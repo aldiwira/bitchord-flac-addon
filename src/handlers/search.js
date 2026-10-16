@@ -1,0 +1,108 @@
+import { settleAll, parseTier } from '../../lib/http.js';
+import { ACTIVE } from '../registry.js';
+import { MAX_ROWS, SEARCH_TIMEOUT_MS } from '../config.js';
+import { json, log } from '../utils/response.js';
+
+/**
+ * One search across every active source.
+ *
+ * A query that one source answers and another does not is the normal case, not
+ * an error, and the rows from both are returned in the order the sources were
+ * configured — the first source's best match leading, because it is the one the
+ * operator put first.
+ */
+export async function search(query, limit, signal) {
+  const results = await settleAll(
+    ACTIVE.map(
+      (source) => async () => ({ source, rows: await source.search(query, limit, signal) }),
+    ),
+    ACTIVE.length,
+  );
+
+  const rows = [];
+  const failures = [];
+  for (const entry of results) {
+    if (entry.ok) {
+      rows.push(...entry.value.rows);
+    } else {
+      failures.push({ source: entry.value?.source?.id ?? '?', error: entry.error?.message });
+    }
+  }
+
+  // De-duplicate on the id, keeping the earliest occurrence. Two catalogues will
+  // occasionally hand back the same recording, and BitChord's matcher would
+  // otherwise spend two candidate slots on it.
+  const seen = new Set();
+  const unique = rows.filter((row) => {
+    if (seen.has(row.id)) return false;
+    seen.add(row.id);
+    return true;
+  });
+
+  return { rows: unique.slice(0, limit), failures };
+}
+
+/**
+ * Reduces a row to the wire shape BitChord reads.
+ *
+ * Only fields from `AddonTrack` are emitted. Everything prefixed `_` is this
+ * addon's own bookkeeping — the source name and native handle it needs to
+ * resolve the row later — and BitChord's parser ignores unknown keys, so sending
+ * it is harmless but sending nothing it cannot use is better.
+ */
+export function wireRow(row) {
+  return {
+    id: row.id,
+    title: row.title,
+    artist: row.artist ?? '',
+    album: row.album ?? '',
+    duration: row.duration ?? undefined,
+    artworkURL: row.artworkURL ?? undefined,
+    albumArtworkURL: row.albumArtworkURL ?? undefined,
+    format: row.format ?? 'flac',
+    audioQuality: row.audioQuality ?? 'LOSSLESS',
+  };
+}
+
+export async function handleSearch(req, res, url) {
+  const query = (url.searchParams.get('q') ?? '').trim();
+  if (!query) return json(res, 200, { tracks: [] });
+
+  const tier = parseTier(url.searchParams.get('quality'));
+  const limit = Math.min(
+    Math.max(Number(url.searchParams.get('limit')) || MAX_ROWS, 1),
+    MAX_ROWS,
+  );
+
+  const started = Date.now();
+  const deadline = AbortSignal.timeout(SEARCH_TIMEOUT_MS);
+
+  let outcome;
+  try {
+    outcome = await search(query, limit, deadline);
+  } catch (error) {
+    log('error', 'search threw', { query, error: error.message });
+    return json(res, 502, {
+      error: 'UPSTREAM_UNAVAILABLE',
+      message: 'every source failed',
+    });
+  }
+
+  if (outcome.failures.length) {
+    log('warn', 'partial search', {
+      query,
+      tier,
+      failed: outcome.failures,
+      rows: outcome.rows.length,
+    });
+  }
+
+  log('info', 'search', {
+    query,
+    tier,
+    rows: outcome.rows.length,
+    ms: Date.now() - started,
+  });
+
+  return json(res, 200, { tracks: outcome.rows.map(wireRow) });
+}
