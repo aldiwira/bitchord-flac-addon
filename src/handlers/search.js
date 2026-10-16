@@ -1,4 +1,4 @@
-import { settleAll, parseTier } from '../../lib/http.js';
+import { settleAll, parseTier } from '../lib/http.js';
 import { ACTIVE } from '../registry.js';
 import { MAX_ROWS, SEARCH_TIMEOUT_MS } from '../config.js';
 import { json, log } from '../utils/response.js';

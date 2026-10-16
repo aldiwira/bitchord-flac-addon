@@ -1,6 +1,6 @@
-import { parseTier, NotFound, UpstreamError } from '../../lib/http.js';
-import { parseTrackId } from '../../lib/trackid.js';
-import { archive, parseArchiveId } from '../../lib/sources/archive.js';
+import { parseTier, NotFound, UpstreamError } from '../lib/http.js';
+import { parseTrackId } from '../lib/trackid.js';
+import { archive, parseArchiveId } from '../lib/sources/archive.js';
 import { REGISTRY } from '../registry.js';
 import { SEARCH_TIMEOUT_MS, PROXY_AUDIO, TOKEN } from '../config.js';
 import { json, notFound, log, publicOrigin } from '../utils/response.js';

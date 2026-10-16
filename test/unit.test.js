@@ -1,9 +1,9 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseFlacStreamInfo, flacKbps, STREAMINFO_BYTES } from '../lib/flac.js';
-import { encodePart, decodePart, makeTrackId, parseTrackId } from '../lib/trackid.js';
-import { parseTier, TtlCache, settleAll, cleanSegment } from '../lib/http.js';
+import { parseFlacStreamInfo, flacKbps, STREAMINFO_BYTES } from '../src/lib/flac.js';
+import { encodePart, decodePart, makeTrackId, parseTrackId } from '../src/lib/trackid.js';
+import { parseTier, TtlCache, settleAll, cleanSegment } from '../src/lib/http.js';
 
 /**
  * Builds a real FLAC STREAMINFO header.
