@@ -1,12 +1,10 @@
-import { parseTier, NotFound, UpstreamError } from '../lib/http.js';
+import { parseTier, NotFound } from '../lib/http.js';
 import { parseTrackId } from '../lib/trackid.js';
 import { archive, parseArchiveId } from '../lib/sources/archive.js';
 import { REGISTRY } from '../registry.js';
-import { SEARCH_TIMEOUT_MS, PROXY_AUDIO, TOKEN } from '../config.js';
-import { json, notFound, log, publicOrigin } from '../utils/response.js';
+import { MEDIA_RETRIES, PROXY_AUDIO } from '../config.js';
+import { json, notFound, log } from '../utils/response.js';
 const { delay } = await import('node:timers/promises');
-
-const MEDIA_RETRIES = 3;
 
 export function idFromPath(pathname, prefix) {
   const raw = pathname.slice(prefix.length);
@@ -33,6 +31,13 @@ export async function resolve(id, tier, signal) {
 }
 
 export async function handleMedia(req, res, url) {
+  if (!PROXY_AUDIO) {
+    return json(res, 404, {
+      error: 'PROXY_DISABLED',
+      message: 'audio is not proxied by this host (PROXY=0)',
+    });
+  }
+
   const id = idFromPath(url.pathname, '/media/').replace(/\.flac$/i, '');
 
   let resolved;

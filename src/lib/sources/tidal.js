@@ -1,18 +1,18 @@
-﻿/**
+/**
  * Tidal, through Monochrome's public catalogue API.
  *
  * This is the source that makes the addon worth deploying. It needs no account,
- * no token and no developer credentials â€” `tracks.monochrome.st` is a public
+ * no token and no developer credentials — `tracks.monochrome.st` is a public
  * read-only index, and the audio it serves is genuine FLAC.
  *
  * Two shapes, and the difference matters:
  *
- *   GET /search/tracks?q=â€¦&limit=N  â†’ metadata, JSON, fast
- *   GET /track/{id}                 â†’ the FLAC bytes themselves
+ *   GET /search/tracks?q=…&limit=N  → metadata, JSON, fast
+ *   GET /track/{id}                 → the FLAC bytes themselves
  *
  * So there is no URL-resolution step. There is no signature to obtain, nothing
  * that expires between the `/search` and the `/stream` call, and no second
- * round trip on the path that has to finish before audio starts â€” which is the
+ * round trip on the path that has to finish before audio starts — which is the
  * one thing the other candidate sources all got wrong.
  *
  * What it does not do is describe itself. The response is
@@ -37,9 +37,8 @@ const searchCache = new TtlCache(2_000);
 const SEARCH_TTL_MS = 5 * 60 * 1000;
 
 /**
- * Monochrome publishes artwork through its own proxy, which needs the Referer
- * its own page sends. Returning the URL unmodified would give BitChord a 403
- * and an empty album art square.
+ * Keep only absolute http(s) artwork URLs; Monochrome's proxy URLs are already
+ * absolute, so nothing is rewritten here.
  */
 function artwork(url) {
   if (!url) return undefined;
@@ -48,7 +47,7 @@ function artwork(url) {
 
 /**
  * Tidal reports duration in milliseconds. BitChord reads `duration` as seconds
- * and accepts a decimal, so the division is not optional â€” handing it 391376
+ * and accepts a decimal, so the division is not optional — handing it 391376
  * would put every track's length out by a factor of a thousand and quietly
  * break matching against anything that knows the real runtime.
  */
@@ -98,7 +97,7 @@ export const tidal = {
           audioQuality: 'LOSSLESS',
           // Monochrome's index does not say which release a row came from, and
           // BitChord's matcher treats a missing album as "unknown" rather than
-          // "wrong" â€” which is the correct thing for it to treat it as.
+          // "wrong" — which is the correct thing for it to treat it as.
           albumArtworkURL: undefined,
           _source: this.id,
           _nativeId: String(t.id),

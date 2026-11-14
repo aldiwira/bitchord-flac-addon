@@ -15,7 +15,7 @@ WORKDIR /app
 
 COPY package.json ./
 COPY server.js ./
-COPY lib ./lib
+COPY src ./src
 
 ENV NODE_ENV=production \
     PORT=8787 \

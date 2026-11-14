@@ -1,10 +1,10 @@
-﻿/**
+/**
  * Internet Archive, as a second pair of hands.
  *
  * Kept because it fails differently from everything else here. Tidal has a
  * commercial catalogue with a commercial licensing story; the Archive has
- * freely-licensed recordings â€” live tapes, bootlegs, public-domain transfers,
- * classical and jazz sets â€” that Tidal will never hold. A listener asking for a
+ * freely-licensed recordings — live tapes, bootlegs, public-domain transfers,
+ * classical and jazz sets — that Tidal will never hold. A listener asking for a
  * Grateful Dead soundboard or a 1970s radio session gets an answer from here and
  * a miss from the other source.
  *
@@ -62,7 +62,7 @@ const ITEM_TTL_MS = 30 * 60 * 1000;
  * A track number at the front of a filename: `03 - Title`, `3. Title`, `07_Title`.
  *
  * Album rippers are near-universal in their conventions and this is where most of
- * them agree, so stripping it materially improves the match BitChord attempts â€”
+ * them agree, so stripping it materially improves the match BitChord attempts —
  * its matcher compares titles, and "07 - Ventura" is not "Ventura".
  */
 const LEADING_TRACK_NUMBER = /^\s*\d{1,3}\s*[-._)\]]*\s+/;
@@ -117,9 +117,8 @@ export const archive = {
     const text = String(query ?? '').trim();
     if (!text) return [];
 
-    // Keep the cache key to the query and the cap, not to the caller's limit:
-    // this source always fans out a fixed number of items, so a larger limit is
-    // the same work.
+    // Cache key includes the fan-out (derived from the caller's limit), so a
+    // larger limit is not served from a smaller cached result.
     const fanout = Math.min(Math.max(limit, 1), 40);
     return searchCache.wrap(`archive:${text.toLowerCase()}:${fanout}`, SEARCH_TTL_MS, async () => {
       // Composed with whatever deadline the caller brought, so a caller that
@@ -158,8 +157,8 @@ export const archive = {
         if (!entry.ok) continue;
         rows.push(...entry.value.rows);
       }
-      // The Archive's own ordering is popularity-then-title, and the fan-out
-      // ran concurrently, so restore a stable order before truncating.
+      // settleAll preserves input order, so rows stay in item order; truncate
+      // to the fan-out cap.
       return rows.slice(0, fanout);
     });
   },

@@ -1,5 +1,5 @@
-import { json, log } from '../utils/response.js';
-import { VERSION } from '../config.js';
+import { json } from '../utils/response.js';
+import { VERSION, STARTED } from '../config.js';
 import { ACTIVE } from '../registry.js';
 
 export async function handleHealth(req, res) {
@@ -18,7 +18,7 @@ export async function handleHealth(req, res) {
     routes: ['/manifest.json', '/search', '/stream/{id}'],
     optionalRoutes: process.env.PROXY === '1' ? ['/media/{id}.flac'] : ['/media/{id}.flac (PROXY=0)'],
     proxyAudio: process.env.PROXY === '1',
-    uptimeSec: Math.round((Date.now() - Date.now()) / 1000), // TODO: track actual start time
+    uptimeSec: Math.round((Date.now() - STARTED) / 1000),
     node: process.version,
     sources,
   });

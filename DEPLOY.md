@@ -66,15 +66,14 @@ Caddy provisions the certificate itself. Done.
 
 ## 3. Docker
 
-No `Dockerfile` is committed because there is nothing to build — the whole thing
-is one file and its own libraries. If you want one anyway:
+A `Dockerfile` is committed. If you want to build it yourself:
 
 ```dockerfile
 FROM node:22-alpine
 WORKDIR /app
 COPY package.json ./
 COPY server.js ./
-COPY lib ./lib
+COPY src ./src
 ENV PORT=8787 HOST=0.0.0.0
 EXPOSE 8787
 CMD ["node", "server.js"]

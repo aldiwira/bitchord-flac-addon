@@ -23,16 +23,6 @@ export function notFound(res, message) {
   json(res, 404, { error: 'NOT_FOUND', message });
 }
 
-export async function readBody(req) {
-  const chunks = [];
-  let total = 0;
-  for await (const chunk of req) {
-    total += chunk.length;
-    if (total > 512 * 1024) throw new Error('body too large');
-    chunks.push(chunk);
-  }
-  return Buffer.concat(chunks);
-}
 
 export function log(level, message, fields = {}) {
   const line = { ts: new Date().toISOString(), level, msg: message, ...fields };

@@ -22,15 +22,13 @@
 
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { VERSION, PORT, HOST, TOKEN } from './src/config.js';
+import { PORT, HOST, TOKEN } from './src/config.js';
 import { MANIFEST } from './src/manifest.js';
 import { tokenOk, json, log } from './src/utils/response.js';
 import { handleSearch } from './src/handlers/search.js';
 import { handleStream } from './src/handlers/stream.js';
 import { handleMedia } from './src/handlers/media.js';
 import { handleHealth } from './src/handlers/health.js';
-
-const STARTED = Date.now();
 
 const server = createServer(async (req, res) => {
   const requestId = randomUUID().slice(0, 8);

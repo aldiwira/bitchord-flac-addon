@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const modulePath = resolve(process.argv[2] ?? `${here}/../modules/bitchord-stream-flac.js`);
+const modulePath = resolve(process.argv[2] ?? `${here}/../modules/bitchord-tidal-flac.js`);
 const code = readFileSync(modulePath, 'utf8');
 
 let pass = 0;
@@ -90,20 +90,7 @@ function loadModule(source) {
   const module_ = { exports: {} };
   let initError = null;
 
-  const wrapped = new Function(
-    'module', 'exports', 'self', 'fetch', 'setTimeout', 'clearTimeout', 'console',
-    `
-    try {
-      ${source}
-    } catch (e) {
-      __initError = e && e.message ? e.message : String(e);
-    }
-  `,
-  );
-
-  // `__initError` has to be reachable after the call, so it is threaded through
-  // a sentinel the wrapper can see.
-  let captured = null;
+  let captured = [];
   const runner = new Function(
     'module', 'exports', 'self', 'fetch', 'setTimeout', 'clearTimeout', 'console', 'sink',
     `
@@ -117,9 +104,9 @@ function loadModule(source) {
 
   runner(
     module_, module_.exports, {}, bridgeFetch, bridgeSetTimeout, () => {},
-    { log() {}, error() {}, warn() {}, info() {} }, captured ?? (captured = []) ,
+    { log() {}, error() {}, warn() {}, info() {} }, captured,
   );
-  initError = captured && captured.length ? captured[0] : null;
+  initError = captured.length ? captured[0] : null;
 
   if (initError) throw new Error(`Module init error: ${initError}`);
   const exports_ = module_.exports;

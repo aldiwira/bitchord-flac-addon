@@ -51,7 +51,7 @@ Then in BitChord:
 
 > **Settings → Sources → Add an addon** → paste `http://<this-host>:8787/manifest.json`
 
-No dependencies. Node 18.17+.
+No dependencies. Node 20.3+.
 
 ### It shows up with a name
 
@@ -188,7 +188,7 @@ against 4 MB chunks, the upstream is also noticeably flaky (7 of 11 succeeded on
 a clean run), which is the more likely thing to be felt: an occasional track that
 does not start, which BitChord handles by falling through to YouTube Music.
 
-If a track fails to play, `scripts/contract-check.js` will tell you whether the
+If a track fails to play, `src/scripts/contract-check.js` will tell you whether the
 addon is at fault or the upstream is. Short ranged reads — the ones a player
 actually makes — are reliable; long single reads are not.
 
@@ -209,7 +209,7 @@ actually enforces, then downloads the first bytes of a real stream and checks
 they are `fLaC`:
 
 ```bash
-node scripts/contract-check.js http://localhost:8787
+node src/scripts/contract-check.js http://localhost:8787
 ```
 
 ```
@@ -246,7 +246,7 @@ so it cannot decide the latency of the whole addon, and exceeding that budget
 returns whatever rows arrived — a partial answer, not a failure. `SOURCES=tidal`
 brings `/search` down to about 1.6 s.
 
-Probes and catalogue answers are cached; see `lib/http.js` for why a *failed*
+Probes and catalogue answers are cached; see `src/lib/http.js` for why a *failed*
 probe is deliberately not cached.
 
 ---
@@ -265,17 +265,17 @@ behind any TLS-terminating proxy (Caddy, nginx, Cloudflare) if you do not have o
 
 ```
 server.js                    the three addon routes, plus /health and the proxy
-lib/flac.js                  STREAMINFO parsing — how a quality claim is made honest
-lib/http.js                  timeouts, retries, caching, partial-failure handling
-lib/trackid.js               ids that survive being put in a URL path segment
-lib/sources/tidal.js         Tidal via Monochrome's public index
-lib/sources/archive.js       Internet Archive
-scripts/contract-check.js    live check against the rules BitChord enforces
+src/lib/flac.js              STREAMINFO parsing — how a quality claim is made honest
+src/lib/http.js              timeouts, retries, caching, partial-failure handling
+src/lib/trackid.js           ids that survive being put in a URL path segment
+src/lib/sources/tidal.js     Tidal via Monochrome's public index
+src/lib/sources/archive.js   Internet Archive
+src/scripts/contract-check.js live check against the rules BitChord enforces
 test/unit.test.js            parser, id codec, cache semantics
 ```
 
 Adding a source means writing one file exporting `search`, `resolve`, `mediaUrl`
-and `health`, and adding it to the `REGISTRY` map in `server.js`. It is called in
+and `health`, and adding it to the `REGISTRY` map in `src/registry.js`. It is called in
 parallel with the others and its failure never fails a search.
 
 ---

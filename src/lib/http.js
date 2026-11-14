@@ -175,19 +175,13 @@ export class TtlCache {
   /**
    * Read-through.
    *
-   * `cacheNull` exists for the callers whose failure is a *transient* answer
-   * rather than a negative one. A FLAC probe that times out, a network blip, an
-   * upstream having a bad minute — none of those are "this is not FLAC", and
-   * caching one under the same key as a success means a track can be permanently
-   * stripped of the sample rate and bit depth that would have identified it,
-   * for the life of the process, off a single unlucky packet.
-   *
-   * So a null result is recomputed on the next ask unless the caller says
-   * otherwise. That is the right default: these caches exist to avoid a request,
-   * and re-making one on the rare occasion it failed is far cheaper than
-   * answering wrongly for the rest of the run.
+   * A null result is never cached, so a transient failure (a timed-out probe,
+   * a network blip) is recomputed on the next ask rather than being stored as
+   * a permanent negative. That is the right default: these caches exist to
+   * avoid a request, and re-making one on the rare occasion it failed is far
+   * cheaper than answering wrongly for the rest of the run.
    */
-  async wrap(key, ttlMs, produce, { cacheNull = false } = {}) {
+  async wrap(key, ttlMs, produce) {
     const hit = this.get(key);
     if (hit !== undefined) return hit;
     const value = await produce();
@@ -249,10 +243,6 @@ export function parseTier(raw) {
 }
 
 /** True when the tier asks for lossless, which is what every source here serves. */
-export function wantsLossless(tier) {
-  return tier === 'LOSSLESS';
-}
-
 /** Strips characters that would break a URL path segment. */
 export function cleanSegment(value) {
   return String(value ?? '')

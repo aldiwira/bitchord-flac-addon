@@ -69,7 +69,7 @@ export async function handleStream(req, res, url) {
 
   const answer = resolved.result;
   const proxied = PROXY_AUDIO;
-  const url_ = proxied
+  const playableUrl = proxied
     ? `${publicOrigin(req)}/media/${encodeURIComponent(id)}.flac` +
       (TOKEN ? `?token=${encodeURIComponent(TOKEN)}` : '')
     : answer.url;
@@ -85,7 +85,7 @@ export async function handleStream(req, res, url) {
   });
 
   return json(res, 200, {
-    url: url_,
+    url: playableUrl,
     codec: answer.codec,
     container: answer.container,
     manifest: answer.manifest,

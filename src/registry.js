@@ -1,5 +1,5 @@
-import { tidal } from '../lib/sources/tidal.js';
-import { archive } from '../lib/sources/archive.js';
+import { tidal } from './lib/sources/tidal.js';
+import { archive } from './lib/sources/archive.js';
 
 /** Only the sources named here are asked. Order is the order they are asked in. */
 export const REGISTRY = new Map([

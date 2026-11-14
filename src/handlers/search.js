@@ -29,9 +29,9 @@ export async function search(query, limit, signal) {
     }
   }
 
-  // De-duplicate on the id, keeping the earliest occurrence. Two catalogues will
-  // occasionally hand back the same recording, and BitChord's matcher would
-  // otherwise spend two candidate slots on it.
+  // De-duplicate exact duplicate ids, keeping the earliest occurrence. A row
+  // from two different catalogues has a different id, so it is kept; only a
+  // source that returns the same id twice is collapsed here.
   const seen = new Set();
   const unique = rows.filter((row) => {
     if (seen.has(row.id)) return false;
