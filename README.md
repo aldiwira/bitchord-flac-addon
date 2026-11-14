@@ -83,13 +83,19 @@ Two consequences, both deliberate:
 | Source | Credentials | What it is | Verified |
 |---|---|---|---|
 | **Tidal** (via Monochrome's public index) | **none** | The commercial catalogue. `/search/tracks` for metadata, `/track/{id}` for the FLAC itself. | `fLaC` bytes, 206 range responses, `HEAD` OK |
-| **Internet Archive** | **none** | Freely-licensed recordings: live tapes, bootlegs, public-domain transfers, classical and jazz sets. | `fLaC` bytes, 963,908 items indexed |
+| **Qobuz** (via a public relay, or your own `qobuz-rest-api`) | **none** for the relay | The only source that can serve **Hi-Res**: 24-bit, up to 192 kHz. Asked for `HI_RES` whenever lossless is wanted; what arrives is probed. | relay returned `503 Service Suspended` at the time of writing — see below |
+| **Monochrome** (public instances) | **none** | The thorough half of the Tidal index: also walks the public instance registry, and is the only source that knows about DASH manifests and 30-second previews. | `fLaC` bytes via `tracks.monochrome.st` |
+| **Deezer** | **none** | **Catalogue only.** Public API, broadest catalogue, carries ISRCs. Holds no audio, so every `deezer:` row fails over to a source that does. | rows returned; no stream by design |
+| **Internet Archive** | **none** | Freely-licensed recordings: live tapes, bootlegs, public-domain transfers, classical and jazz sets. | `fLaC` bytes, 985,733 items indexed |
 | **NetEase Cloud Music** (via a public NeteaseCloudMusicApi instance) | **none** | The Chinese catalogue. Anonymous playback is MP3/AAC, typically 128–320 kbps; FLAC only when the API instance itself is logged in. NetEase region-checks the caller, so the addon sends a default `realIP`. | `type:"mp3"`, ID3 bytes, 128–320 kbps |
+| **NetEase Cloud Music (Meting)** | **none** | Lossless from the same catalogue through a Meting API instance. `br=2000` asks for FLAC; tracks without a lossless rendition fall back to MP3, and `/stream` reports whichever the CDN actually serves. | `fLaC` bytes, STREAMINFO read; MP3 fallback labelled `mp3` |
 
-Both are CD quality — 44.1 kHz / 16-bit, which is bit-exact lossless. The Tidal
-index serves the same file whichever tier is asked for, so **24-bit/96 kHz Hi-Res
-is not available from it**, and this addon does not claim otherwise: the
-`quality` string is generated from the header that was actually read.
+Tidal and Monochrome are CD quality — 44.1 kHz / 16-bit, which is bit-exact
+lossless. The Tidal index serves the same file whichever tier is asked for, so
+**24-bit/96 kHz Hi-Res is not available from it**, and this addon does not claim
+otherwise: the `quality` string is generated from the header that was actually
+read. Qobuz is the only Hi-Res path, and it depends on a relay that outlives its
+own session.
 
 Two sources that were tested and **rejected**, recorded here so nobody re-runs the
 same experiment:
@@ -98,14 +104,19 @@ same experiment:
 |---|---|
 | Kuwo | `mobi.kuwo.cn` answered a FLAC request with `br=1` and served an MP3, and returned `code 407` ("not available in your region") for other tracks. |
 
-Monochrome's *other* public instances — `api.monochrome.tf`, the five `qqdl.site`
-hosts, `tidal.kinoplus.online` — are all dead as of September 2026 (DNS failure
-or TLS EOF). `tracks.monochrome.st` is the one that answers. It is a
-configurable base URL, so it can be repointed without a code change:
+**The public Qobuz relay is gone.** `soundfean-musics.onrender.com` answers every
+request with `503 Service Suspended`, permanently rather than as a cold start. The
+source is kept because the code path is sound and the fix is configuration, not
+code: point `QOBUZ_REST_API` at your own `qobuz-rest-api` instance and the Hi-Res
+path works again. `/health` reports the relay as `ok: false` rather than hiding it,
+and failover walks past it, so its failure costs nothing but the Hi-Res rows.
 
-```bash
-TIDAL_BASE_URL=https://some-other-instance.example node server.js
-```
+Monochrome's *other* public instances — `api.monochrome.tf`, the `qqdl.site`
+hosts, `tidal.kinoplus.online`, `triton.squid.wtf` — are all dead as of November
+2026 (DNS failure or TLS failure). `tracks.monochrome.st` is the one that answers.
+The registry is still read at runtime, because the day one of them comes back is
+the day this addon should find it without a deploy. `TIDAL_BASE_URL` and
+`MONOCHROME_BASE_URL` repoint the modern API without a code change.
 
 ---
 
@@ -115,12 +126,18 @@ TIDAL_BASE_URL=https://some-other-instance.example node server.js
 |---|---|---|
 | `PORT` | `8787` | listen port |
 | `HOST` | `0.0.0.0` | bind address |
-| `SOURCES` | `tidalv2,tidal,archive` | which sources to ask, in priority order |
+| `SOURCES` | `qobuz,monochrome,netease,tidal,archive` | which sources to ask, in priority order |
 | `PROXY` | `0` | `1` to serve audio through this host |
 | `ADDON_TOKEN` | unset | if set, `?token=` is required on every route |
-| `NETEASE_API_BASE` | `https://ncmapi.bixygames.com` | the NeteaseCloudMusicApi instance |
-| `NETEASE_REAL_IP` | `127.0.0.1` | address sent to NetEase; the public instance is overseas, where most tracks answer `code 404` |
+| `NETEASEV2_API_BASE` | `https://api.qijieya.cn/meting` | the Meting API instance |
+| `NETEASEV2_SERVER` | `netease` | the Meting backend to ask |
+| `NETEASEV2_SEARCH_BASE` | `https://music.163.com/api/search/get` | NetEase's own search, which comes with album and duration; empty string forces search through Meting |
+| `NETEASEV2_DETAIL_BASE` | `https://music.163.com/api/song/detail` | NetEase's own detail endpoint, asked for the album Meting's search omits |
 | `TIDAL_BASE_URL` | `https://tracks.monochrome.st` | the Tidal-backed index |
+| `MONOCHROME_BASE_URL` | `https://tracks.monochrome.st` | the first Monochrome instance asked |
+| `QOBUZ_UPSTREAM_BASE_URL` | the relay in `qobuz.js` | the public Qobuz relay |
+| `QOBUZ_REST_API` | unset | your own qobuz-rest-api; preferred over the relay when set |
+| `DEEZER_API_BASE` | `https://api.deezer.com` | Deezer's catalogue API |
 
 Run Tidal alone — the fastest possible search, since the Archive's fan-out is
 what makes `/search` slow:
@@ -131,7 +148,58 @@ SOURCES=tidal node server.js
 
 ---
 
-## Two decisions worth explaining
+## Failover: a row that its own catalogue cannot play
+
+A `/search` row names the catalogue that produced it, and `/stream` asks that
+catalogue first. When it does not hold a playable rendition — a Tidal row whose
+index has the metadata but no file behind it, a NetEase row whose region check
+came back empty — the row is still *correct*, and the recording almost certainly
+exists somewhere else. So it is re-matched against the other configured sources
+instead of being dropped.
+
+BitChord's own fallback drops it: a 404 moves on to the next *source*, and when
+this addon is the only one installed there is nothing to move on to.
+
+```
+netease row → NetEase has no rendition
+  → "Daft Punk One More Time", 320s
+    → Tidal index finds the same recording → FLAC ✅
+```
+
+Matching is deliberately strict, because the failure modes are not symmetric: a
+miss is a track that does not play, while a wrong match is a track that plays the
+wrong thing. Title must match exactly after normalising accents and release
+qualifiers — `(Remastered 2011)`, `[Deluxe Edition]`, `(Mono)` are editions of a
+recording, but `(Live)` is a different performance and is not folded in. Artist
+strings must share one artist, in either order and either credit form. Duration
+is the only inexact field, within 45 s.
+
+### Where the metadata comes from
+
+`/stream` receives an id and nothing else, so the title, artist and duration a
+re-match needs travel inside it. The id `/search` emits is therefore a container,
+not a pointer:
+
+```
+netease:~eyJ2IjoxLCJyIjoibmV0ZWFzZToxNzQ1NTgwMCIsInQiOiJPbmUgTW9yZSBUaW1lIiwi...
+          └── base64url JSON {v,r,t,a,d} ─────────────────────────────────────┘
+```
+
+BitChord treats it as opaque, which is all it requires. The benefit is that a
+cold `/stream` behaves exactly like a warm one — after a restart, or from a second
+process — with nothing remembered between requests. The readable form survives
+internally, so logs keep showing `tidal:154049681742106624`.
+
+Failover is sequential: the issuing source first, then each other source in
+registry order, stopping at the first success. Searches across candidates run in
+parallel — one slow catalogue must not hold up an answer the others can give — but
+resolutions do not, because each is a stream URL that upstream rate-limits and
+only one is wanted. A candidate that is merely *broken* is walked past exactly
+like one that missed.
+
+---
+
+## Three decisions worth explaining
 
 ### Quality claims are read, not asserted
 
@@ -248,6 +316,13 @@ so it cannot decide the latency of the whole addon, and exceeding that budget
 returns whatever rows arrived — a partial answer, not a failure. `SOURCES=tidal`
 brings `/search` down to about 1.6 s.
 
+NetEase V2 searches NetEase directly, which measures a steady 1.3–1.5 s and
+returns the album with the row. Meting is the fallback, and it is slower: its
+search ranged 1.2–3.5 s in the same test, and Meting rows carry no album, so the
+album has to be fetched separately (2 s budget). That is why it is the fallback
+and not the primary. If your client times out a search in under ~2 s, set
+`SOURCES` to drop this source rather than watching it return nothing.
+
 Probes and catalogue answers are cached; see `src/lib/http.js` for why a *failed*
 probe is deliberately not cached.
 
@@ -270,9 +345,15 @@ server.js                    the three addon routes, plus /health and the proxy
 src/lib/flac.js              STREAMINFO parsing — how a quality claim is made honest
 src/lib/http.js              timeouts, retries, caching, partial-failure handling
 src/lib/trackid.js           ids that survive being put in a URL path segment
+src/lib/failover.js          the id container, row matching, the cross-source walk
+src/lib/resolve.js           one id → one playable stream, whichever source has it
 src/lib/sources/tidal.js     Tidal via Monochrome's public index
 src/lib/sources/archive.js   Internet Archive
-src/lib/sources/netease.js   NetEase Cloud Music via a NeteaseCloudMusicApi instance
+src/lib/sources/netease.js   NetEase Cloud Music — NetEase search, Meting for audio
+src/lib/sources/monochrome.js public instances, DASH and preview handling
+src/lib/sources/qobuz.js     Hi-Res via a relay or your own qobuz-rest-api
+src/lib/sources/deezer.js    catalogue only — rows that fail over to the others
+src/lib/probe.js             one STREAMINFO read, shared by every source
 src/scripts/contract-check.js live check against the rules BitChord enforces
 test/unit.test.js            parser, id codec, cache semantics
 ```

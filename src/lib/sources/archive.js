@@ -17,7 +17,7 @@
  * search followed by a bounded fan-out, which is why `expand` is capped.
  */
 
-import { STREAMINFO_BYTES, parseFlacStreamInfo, flacKbps } from '../flac.js';
+import { probeFlac } from '../probe.js';
 import { httpJson, httpGet, TtlCache, settleAll, NotFound } from '../http.js';
 
 const BASE = 'https://archive.org';
@@ -52,7 +52,6 @@ const ITEM_TIMEOUT_MS = 5_000;
 const MIN_SECONDS = 20;
 const MAX_SECONDS = 45 * 60;
 
-const probeCache = new TtlCache(4_000);
 const searchCache = new TtlCache(2_000);
 const itemCache = new TtlCache(4_000);
 const SEARCH_TTL_MS = 10 * 60 * 1000;
@@ -247,7 +246,7 @@ export const archive = {
     if (!filename) throw new NotFound('no filename');
 
     const url = this.mediaUrl(identifier, filename);
-    const probe = await this.probe(url, `${identifier}/${filename}`, signal);
+    const probe = await probeFlac(url, { cacheKey: `archive:${identifier}/${filename}`, signal });
 
     return {
       url,
@@ -257,7 +256,7 @@ export const archive = {
       encrypted: false,
       sampleRate: probe?.sampleRate ?? null,
       bitDepth: probe?.bitDepth ?? null,
-      bitrate: probe ? flacKbps(probe.byteLength, probe.durationSec) : null,
+      bitrate: probe?.bitrate ?? null,
       channels: probe?.channels ?? null,
       probed: Boolean(probe),
       error: probe ? undefined : 'served, but the FLAC header could not be read',
@@ -265,29 +264,7 @@ export const archive = {
   },
 
   async probe(url, cacheKey, signal) {
-    return probeCache.wrap(`probe:${cacheKey}`, Number.MAX_SAFE_INTEGER, async () => {
-      let response;
-      try {
-        response = await httpGet(url, {
-          timeoutMs: 12_000,
-          retries: 1,
-          range: `bytes=0-${STREAMINFO_BYTES - 1}`,
-          signal,
-        });
-      } catch {
-        return null;
-      }
-      const head = Buffer.from(await response.arrayBuffer());
-      const info = parseFlacStreamInfo(head);
-      if (!info) return null;
-      const contentRange = response.headers.get('content-range') ?? '';
-      const slash = contentRange.lastIndexOf('/');
-      const total = slash >= 0 ? Number(contentRange.slice(slash + 1)) : NaN;
-      return {
-        ...info,
-        byteLength: Number.isFinite(total) && total > 0 ? total : null,
-      };
-    });
+    return probeFlac(url, { cacheKey: `archive:${cacheKey}`, signal });
   },
 
   async health() {

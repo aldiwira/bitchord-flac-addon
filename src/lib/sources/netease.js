@@ -1,97 +1,350 @@
 /**
- * NetEase Cloud Music, through a NeteaseCloudMusicApi instance.
+ * NetEase Cloud Music, through a Meting API instance.
  *
- * Anonymous search is useful and anonymous playback is not FLAC: the player
- * endpoint answers with MP3 or AAC and says so in its own `type` field, which
- * this source reports rather than dressing up as lossless. A self-hosted API
- * instance with a VIP cookie can return FLAC, and then the same STREAMINFO
- * probe the other sources use reports the real sample rate and bit depth.
+ * The Meting endpoint does the NetEase signing and, on the public instance,
+ * carries the VIP cookie needed for lossless. `br=2000` asks for FLAC; tracks
+ * without a lossless rendition fall back to MP3 and the redirect target's
+ * extension is what tells the two apart. The bytes are then probed exactly like
+ * every other source here, so the reported quality is read rather than asserted.
  *
- * The signing and anonymous-token dance lives in the API service, so this file
- * adds an HTTP client and no crypto dependency.
+ * Search does not go through Meting first. Meting's `type=search` row is
+ * `{name, artist, url, pic, lrc}` with no album, and filling that in costs a
+ * second round trip to NetEase — measured at 1.7–2.4 s, on top of a Meting
+ * search that itself ranged 1.2–3.5 s. NetEase's own unsigned search endpoint
+ * answers the same query in a steady ~1.3 s *with* the album, so it is the
+ * primary path and Meting is the fallback for when it does not answer. Nothing
+ * in the fallback can drop rows: a failed album lookup leaves `album` empty and
+ * the search still returns what it found.
  */
 
 import { STREAMINFO_BYTES, parseFlacStreamInfo, flacKbps } from '../flac.js';
-import { httpJson, httpGet, TtlCache, NotFound, UpstreamError } from '../http.js';
+import { httpJson, httpGet, TtlCache, NotFound } from '../http.js';
 
-const BASE = process.env.NETEASE_API_BASE || 'https://ncmapi.bixygames.com';
+const BASE = (process.env.NETEASEV2_API_BASE || 'https://api.qijieya.cn/meting')
+  .replace(/\/+$/, '');
+const SERVER = process.env.NETEASEV2_SERVER || 'netease';
 
-const probeCache = new TtlCache(4_000);
+/**
+ * NetEase's own search, unsigned and unauthenticated.
+ *
+ * Set it to an empty string to skip it and always search through Meting.
+ */
+const SEARCH_BASE =
+  (process.env.NETEASEV2_SEARCH_BASE ?? 'https://music.163.com/api/search/get')
+    .trim()
+    .replace(/\/+$/, '');
+
+/**
+ * Meting's `type=search` row is `{name, artist, url, pic, lrc}` — the album is
+ * not in the response at all, so every row this source produced carried an
+ * empty album and BitChord had nothing to show there. NetEase's own detail
+ * endpoint (unsigned and unauthenticated) answers the album for a whole batch
+ * of ids in one request, which is what fills the gap on the Meting path.
+ */
+const DETAIL_BASE =
+  (process.env.NETEASEV2_DETAIL_BASE || 'https://music.163.com/api/song/detail')
+    .replace(/\/+$/, '');
+
+const NETEASE_HEADERS = { Referer: 'https://music.163.com/' };
+
+/** Meting's lossless selector. Lower values map to 320/192/128 MP3. */
+const MAX_BR = 2000;
+const DETAIL_CHUNK = 50;
+
+/**
+ * The album lookup's whole budget.
+ *
+ * The album is decoration on a search row; whether it arrives must never decide
+ * whether the rows do. A client that gives up on `/search` after a few seconds
+ * shows nothing at all, so this is capped well under that rather than being
+ * allowed to run the request's full deadline.
+ */
+const DETAIL_TIMEOUT_MS = 2_000;
 const searchCache = new TtlCache(2_000);
 const urlCache = new TtlCache(2_000);
 const SEARCH_TTL_MS = 5 * 60 * 1000;
 const URL_TTL_MS = 5 * 60 * 1000;
 
-const LEVELS = { LOSSLESS: 'lossless', HIGH: 'exhigh', LOW: 'standard' };
+const AUDIO_EXTENSIONS = ['flac', 'mp3', 'aac', 'm4a', 'opus', 'ogg'];
 
-/**
- * The client IP NetEase is told the request came from.
- *
- * The public API instance is hosted outside mainland China, and NetEase answers
- * most tracks with `code 404` when the request looks overseas. Supplying a
- * mainland/private address restores them; set `NETEASE_REAL_IP` to override, or
- * to an empty string to send nothing and accept the region restriction.
- */
-const REAL_IP = String(process.env.NETEASE_REAL_IP ?? '127.0.0.1').trim();
-
-/** Upgrades the plain-HTTP URLs NetEase hands out so a phone does not refuse them. */
+/** Upgrades the plain-HTTP URLs a CDN may hand out. */
 export function httpsUrl(value) {
   const text = String(value ?? '').trim();
   if (!text) return undefined;
   return text.replace(/^http:\/\//i, 'https://');
 }
 
-/** NetEase reports milliseconds; BitChord wants seconds. */
-export function seconds(ms) {
-  const value = Number(ms);
-  if (!Number.isFinite(value) || value <= 0) return undefined;
-  return Math.round(value / 100) / 10;
-}
-
-/** Trusts the declared codec first, then the URL extension, then NetEase's default. */
-export function normalizeCodec(type, url) {
-  const known = ['flac', 'mp3', 'aac', 'm4a', 'opus', 'ogg'];
-  const declared = String(type ?? '').trim().toLowerCase();
-  if (known.includes(declared)) return declared;
+/** Reads the NetEase song id out of a Meting `type=url` link. */
+export function songIdFromUrl(value) {
   try {
-    const ext = new URL(String(url ?? '')).pathname.split('.').pop()?.toLowerCase();
-    if (known.includes(ext)) return ext;
+    const id = new URL(String(value ?? '')).searchParams.get('id');
+    return id ? String(id).trim() || undefined : undefined;
   } catch {
-    /* not a URL; fall through to the NetEase default */
+    return undefined;
   }
-  return 'mp3';
 }
 
-/** One search row, or null when the item has no id or title to show. */
-export function mapSong(song) {
-  const id = song?.id ?? song?.songId;
-  const title = String(song?.name ?? '').trim();
-  if (!id || !title) return null;
+/** The codec named by a redirected CDN path, or undefined when it names none. */
+export function codecFromUrl(value) {
+  try {
+    const ext = new URL(String(value ?? '')).pathname.split('.').pop()?.toLowerCase();
+    return AUDIO_EXTENSIONS.includes(ext) ? ext : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
-  const artists = Array.isArray(song?.ar)
-    ? song.ar
-    : Array.isArray(song?.artists)
-      ? song.artists
+/** Reads the album fields out of one `song/detail` entry. */
+export function albumFromDetail(song) {
+  const album = song?.al ?? song?.album;
+  const name = String(album?.name ?? album ?? '').trim();
+  const artwork = httpsUrl(album?.picUrl ?? song?.picUrl);
+  return { album: name, artworkURL: artwork };
+}
+
+/**
+ * Meting's `type=pic` proxy, which dereferences a NetEase album picture id.
+ *
+ * NetEase's search gives the album a `picId` and a null `picUrl`, so this is the
+ * cover's only route. The id must be exact: a rounded one addresses a different
+ * album's cover, which is why the search payload is parsed with
+ * `preserveIntegers` and every other numeric field here is still a number.
+ */
+export function picUrl(picId) {
+  const id = String(picId ?? '').trim();
+  if (!id || id === '0') return undefined;
+  return `${BASE}/?server=${encodeURIComponent(SERVER)}&type=pic&id=${encodeURIComponent(id)}`;
+}
+
+/**
+ * A search row from NetEase's own search.
+ *
+ * Duration and album both arrive here, so nothing has to be looked up a second
+ * time: the same payload that names a track also names the release it is on.
+ * The album `picUrl` is null in this payload, but the `picId` is not, and
+ * Meting's `type=pic` proxy dereferences it into a cover.
+ */
+export function mapNeteaseRow(song) {
+  const id = song?.id ?? song?.songId;
+  const title = String(song?.name ?? song?.title ?? '').trim();
+  if (id == null || !id || !title) return null;
+
+  const artists = Array.isArray(song?.artists)
+    ? song.artists
+    : Array.isArray(song?.ar)
+      ? song.ar
       : [];
+  const artist = artists
+    .map((entry) => String(entry?.name ?? '').trim())
+    .filter(Boolean)
+    .join(', ');
+  const album = song?.album ?? song?.al ?? {};
+  const ms = Number(song?.duration ?? song?.dt);
 
   return {
     id: `netease:${id}`,
     title,
-    artist: artists.map((a) => String(a?.name ?? '').trim()).filter(Boolean).join(', '),
-    album: String(song?.al?.name ?? song?.album?.name ?? '').trim(),
-    duration: seconds(song?.dt ?? song?.duration),
-    artworkURL: httpsUrl(song?.al?.picUrl ?? song?.album?.picUrl),
-    format: 'mp3',
-    audioQuality: 'HIGH',
+    artist,
+    album: String(album?.name ?? '').trim(),
+    duration: Number.isFinite(ms) && ms > 0 ? Math.round(ms / 100) / 10 : undefined,
+    artworkURL: httpsUrl(album?.picUrl) ?? picUrl(album?.picId),
+    format: 'flac',
+    audioQuality: 'LOSSLESS',
     _source: 'netease',
     _nativeId: String(id),
   };
 }
 
+/** A search row from a Meting row, which carries no album and no duration. */
+export function mapMetingRow(row, album) {
+  const id = songIdFromUrl(row?.url) ?? row?.id ?? row?.songId;
+  const title = String(row?.name ?? row?.title ?? '').trim();
+  if (!id || !title) return null;
+
+  const artist = String(row?.artist ?? row?.artists ?? '')
+    .split('/')
+    .map((name) => name.trim())
+    .filter(Boolean)
+    .join(', ');
+
+  return {
+    id: `netease:${id}`,
+    title,
+    artist,
+    album: album?.album ?? '',
+    artworkURL: album?.artworkURL ?? httpsUrl(row?.pic ?? row?.artworkURL),
+    format: 'flac',
+    audioQuality: 'LOSSLESS',
+    _source: 'netease',
+    _nativeId: String(id),
+  };
+}
+
+/**
+ * Albums for a batch of NetEase ids, keyed by id.
+ *
+ * Best-effort by contract: a search that answered is still a search worth
+ * returning when this call times out, so a failure yields whatever was
+ * collected and the rows keep an empty album rather than being dropped. An
+ * incomplete batch is not cached, so one bad minute is not inherited by every
+ * search for the next five.
+ */
+export async function fetchAlbums(ids, signal) {
+  const wanted = [...new Set(ids.filter(Boolean))];
+  if (!wanted.length) return new Map();
+
+  const key = `netease:detail:${wanted.join(',')}`;
+  const cached = searchCache.get(key);
+  if (cached) return cached;
+
+  // One shared clock for the whole batch, so fifty ids cannot turn into fifty
+  // chances to spend the budget.
+  const deadline = AbortSignal.timeout(DETAIL_TIMEOUT_MS);
+  const composed = signal ? AbortSignal.any([deadline, signal]) : deadline;
+
+  const albums = new Map();
+  let complete = true;
+  for (let i = 0; i < wanted.length; i += DETAIL_CHUNK) {
+    const chunk = wanted.slice(i, i + DETAIL_CHUNK);
+    const url = `${DETAIL_BASE}?ids=${encodeURIComponent(JSON.stringify(songsPayload(chunk)))}`;
+    let payload;
+    try {
+      payload = await httpJson(url, {
+        timeoutMs: DETAIL_TIMEOUT_MS,
+        retries: 0,
+        headers: NETEASE_HEADERS,
+        signal: composed,
+      });
+    } catch {
+      // NetEase being unreachable is not a search failure: the rows are
+      // already in hand and an empty album is how they start anyway.
+      complete = false;
+      break;
+    }
+    const songs = Array.isArray(payload?.songs) ? payload.songs : [];
+    for (const song of songs) {
+      const id = song?.id;
+      if (id == null) continue;
+      const { album, artworkURL } = albumFromDetail(song);
+      if (album || artworkURL) albums.set(String(id), { album, artworkURL });
+    }
+  }
+
+  if (complete) searchCache.set(key, albums, SEARCH_TTL_MS);
+  return albums;
+}
+
+/** Merges an album lookup into rows, leaving every row that has no answer as it was. */
+export function withAlbums(rows, albums) {
+  if (!albums.size) return rows;
+  return rows.map((row) => {
+    const album = albums.get(row._nativeId);
+    if (!album) return row;
+    return {
+      ...row,
+      album: album.album || row.album,
+      artworkURL: album.artworkURL ?? row.artworkURL,
+    };
+  });
+}
+
+/** The id list NetEase accepts, as numbers for real ids and as-is otherwise. */
+export function songsPayload(ids) {
+  return [...new Set(ids.filter(Boolean))].map((id) => Number(id) || id);
+}
+
+/**
+ * Search through NetEase's own endpoint.
+ *
+ * Returns null — not an empty array — when the endpoint did not answer, so the
+ * caller can tell "no such song" from "ask somebody else". An empty array is a
+ * real answer and is returned as one.
+ */
+export async function searchViaNetease(text, capped, signal) {
+  if (!SEARCH_BASE) return null;
+  let payload;
+  try {
+    payload = await httpJson(
+      `${SEARCH_BASE}?s=${encodeURIComponent(text)}&type=1&limit=${capped}`,
+      {
+        timeoutMs: 8_000,
+        retries: 0,
+        headers: NETEASE_HEADERS,
+        signal,
+        preserveIntegers: true,
+      },
+    );
+  } catch {
+    return null;
+  }
+  const songs = Array.isArray(payload?.result?.songs)
+    ? payload.result.songs
+    : Array.isArray(payload?.songs)
+      ? payload.songs
+      : null;
+  if (!songs) return null;
+  return songs.map(mapNeteaseRow).filter(Boolean).slice(0, capped);
+}
+
+/**
+ * Search through Meting, then fill the album from NetEase's detail endpoint.
+ *
+ * The fallback never drops a row over a missing album: `fetchAlbums` answers an
+ * empty map when it cannot, and `withAlbums` then returns the rows unchanged.
+ */
+async function searchViaMeting(text, capped, signal) {
+  const payload = await httpJson(
+    `${BASE}/?server=${encodeURIComponent(SERVER)}` +
+      `&type=search&id=${encodeURIComponent(text)}&limit=${capped}`,
+    { timeoutMs: 12_000, signal },
+  );
+  const rows = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.data)
+      ? payload.data
+      : [];
+  const mapped = rows.map((row) => mapMetingRow(row)).filter(Boolean).slice(0, capped);
+  const albums = await fetchAlbums(
+    mapped.map((row) => row._nativeId),
+    signal,
+  );
+  return withAlbums(mapped, albums);
+}
+
+/** Reads only the first bytes, so an ignored Range request cannot pull the file. */
+async function readHead(response, size) {
+  if (!response.body) return Buffer.alloc(0);
+  const reader = response.body.getReader();
+  const chunks = [];
+  let length = 0;
+  try {
+    while (length < size) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = Buffer.from(value);
+      chunks.push(chunk);
+      length += chunk.length;
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+  return Buffer.concat(chunks).subarray(0, size);
+}
+
+/** Total file size from `Content-Range` when ranged, else `Content-Length`. */
+function totalBytes(response) {
+  const contentRange = response.headers.get('content-range') ?? '';
+  const slash = contentRange.lastIndexOf('/');
+  const fromRange = slash >= 0 ? Number(contentRange.slice(slash + 1)) : NaN;
+  if (Number.isFinite(fromRange) && fromRange > 0) return fromRange;
+  const length = Number(response.headers.get('content-length'));
+  return Number.isFinite(length) && length > 0 ? length : null;
+}
+
 export const netease = {
   id: 'netease',
-  label: 'NetEase',
-  lossless: false,
+  label: 'NetEase V2',
+  lossless: true,
   baseUrl: BASE,
 
   async search(query, limit = 20, signal) {
@@ -100,11 +353,13 @@ export const netease = {
 
     return searchCache.wrap(`netease:${text.toLowerCase()}:${limit}`, SEARCH_TTL_MS, async () => {
       const capped = Math.min(Math.max(Number(limit) || 20, 1), 50);
-      const url = `${BASE}/cloudsearch?keywords=${encodeURIComponent(text)}` +
-        `&type=1&limit=${capped}`;
-      const payload = await httpJson(url, { timeoutMs: 12_000, signal });
-      const songs = Array.isArray(payload?.result?.songs) ? payload.result.songs : [];
-      return songs.map(mapSong).filter(Boolean).slice(0, capped);
+      // Primary: one request, album and duration included, measured steady at
+      // ~1.3 s. A null here means the endpoint did not answer — not that the
+      // song does not exist — so the fallback runs. A non-null empty array is a
+      // real "nothing matched" and must not be second-guessed.
+      const direct = await searchViaNetease(text, capped, signal);
+      if (direct) return direct;
+      return searchViaMeting(text, capped, signal);
     });
   },
 
@@ -112,26 +367,32 @@ export const netease = {
     const id = String(nativeId ?? '').trim();
     if (!id) throw new NotFound('no track id');
 
-    const level = LEVELS[tier] ?? 'lossless';
-    return urlCache.wrap(`netease:url:${id}:${level}`, URL_TTL_MS, async () => {
-      const url = `${BASE}/song/url/v1?id=${encodeURIComponent(id)}` +
-        `&level=${encodeURIComponent(level)}` +
-        (REAL_IP ? `&realIP=${encodeURIComponent(REAL_IP)}` : '');
-      const payload = await httpJson(url, { timeoutMs: 12_000, signal });
-      const item = Array.isArray(payload?.data) ? payload.data[0] : null;
+    return urlCache.wrap(`netease:url:${id}`, URL_TTL_MS, async () => {
+      const target = `${BASE}/?server=${encodeURIComponent(SERVER)}` +
+        `&type=url&id=${encodeURIComponent(id)}&br=${MAX_BR}`;
 
-      if (!item?.url) {
-        const code = item?.code ?? payload?.code;
-        const message = `NetEase returned no playable URL${code ? ` (code ${code})` : ''}`;
-        if (Number(code) === -460) {
-          throw new UpstreamError(message, { status: 502, retryable: false });
+      let response;
+      try {
+        response = await httpGet(target, {
+          timeoutMs: 12_000,
+          retries: 1,
+          range: `bytes=0-${STREAMINFO_BYTES - 1}`,
+          signal,
+        });
+      } catch (error) {
+        if (error instanceof NotFound) {
+          throw new NotFound('NetEase has no playable rendition for this track');
         }
-        throw new NotFound(message);
+        throw error;
       }
 
-      const streamUrl = httpsUrl(item.url);
-      const codec = normalizeCodec(item.type, streamUrl);
-      const bitrate = Number(item.br) > 0 ? Math.round(Number(item.br) / 1000) : null;
+      // Meting answers an unavailable track with an empty 200 and no redirect,
+      // so a final URL that never left the API host names no codec.
+      const streamUrl = httpsUrl(response.url || target);
+      const codec = codecFromUrl(streamUrl);
+      if (!codec) throw new NotFound('NetEase has no playable rendition for this track');
+
+      const head = await readHead(response, STREAMINFO_BYTES);
 
       if (codec !== 'flac') {
         return {
@@ -142,65 +403,66 @@ export const netease = {
           encrypted: false,
           sampleRate: null,
           bitDepth: null,
-          bitrate,
+          bitrate: null,
           channels: null,
           probed: false,
         };
       }
 
-      const probe = await this.probe(streamUrl, id, signal);
+      const info = parseFlacStreamInfo(head);
+      const total = totalBytes(response);
       return {
         url: streamUrl,
         codec: 'flac',
         container: 'flac',
         manifest: 'none',
         encrypted: false,
-        sampleRate: probe?.sampleRate ?? null,
-        bitDepth: probe?.bitDepth ?? null,
-        bitrate: probe ? flacKbps(probe.byteLength, probe.durationSec) : bitrate,
-        channels: probe?.channels ?? null,
-        probed: Boolean(probe),
-        error: probe ? undefined : 'served, but the FLAC header could not be read',
+        sampleRate: info?.sampleRate ?? null,
+        bitDepth: info?.bitDepth ?? null,
+        bitrate: info && total ? flacKbps(total, info.durationSec) : null,
+        channels: info?.channels ?? null,
+        probed: Boolean(info),
+        error: info ? undefined : 'served, but the FLAC header could not be read',
       };
     });
   },
 
-  async probe(url, cacheKey, signal) {
-    return probeCache.wrap(`netease:probe:${cacheKey}`, Number.MAX_SAFE_INTEGER, async () => {
-      let response;
-      try {
-        response = await httpGet(url, {
-          timeoutMs: 12_000,
-          retries: 1,
-          range: `bytes=0-${STREAMINFO_BYTES - 1}`,
-          signal,
-        });
-      } catch {
-        return null;
-      }
-      const head = Buffer.from(await response.arrayBuffer());
-      const info = parseFlacStreamInfo(head);
-      if (!info) return null;
-      const contentRange = response.headers.get('content-range') ?? '';
-      const slash = contentRange.lastIndexOf('/');
-      const total = slash >= 0 ? Number(contentRange.slice(slash + 1)) : NaN;
-      return {
-        ...info,
-        byteLength: Number.isFinite(total) && total > 0 ? total : null,
-      };
-    });
-  },
-
+  /**
+   * Reports both paths, because they fail independently.
+   *
+   * Meting is what `resolve` needs, so it decides `ok`: with Meting down a
+   * search can still answer through NetEase's own endpoint, but no row from
+   * this source can be played. NetEase's search is reported beside it, because
+   * "search fell back" and "playback is down" are different problems.
+   */
   async health() {
-    try {
-      const payload = await httpJson(
-        `${BASE}/cloudsearch?keywords=music&type=1&limit=1`,
-        { timeoutMs: 8_000, retries: 0 },
-      );
-      const n = Array.isArray(payload?.result?.songs) ? payload.result.songs.length : 0;
-      return { ok: true, detail: `${n} result(s) for a probe query` };
-    } catch (error) {
-      return { ok: false, detail: error.message };
-    }
+    const probe = async (url) => {
+      try {
+        const payload = await httpJson(url, { timeoutMs: 8_000, retries: 0 });
+        const n = Array.isArray(payload)
+          ? payload.length
+          : Array.isArray(payload?.result?.songs)
+            ? payload.result.songs.length
+            : Array.isArray(payload?.songs)
+              ? payload.songs.length
+              : 0;
+        return { ok: true, detail: `${n} result(s)` };
+      } catch (error) {
+        return { ok: false, detail: error.message };
+      }
+    };
+
+    const [direct, meting] = await Promise.all([
+      SEARCH_BASE
+        ? probe(`${SEARCH_BASE}?s=music&type=1&limit=1`)
+        : Promise.resolve({ ok: false, detail: 'disabled' }),
+      probe(`${BASE}/?server=${encodeURIComponent(SERVER)}&type=search&id=music&limit=1`),
+    ]);
+
+    return {
+      ok: meting.ok,
+      detail: `netease search ${direct.ok ? 'ok' : 'down'} (${direct.detail}); ` +
+        `meting ${meting.ok ? 'ok' : 'down'} (${meting.detail})`,
+    };
   },
 };

@@ -1,8 +1,6 @@
 import { parseTier, NotFound } from '../lib/http.js';
-import { parseTrackId } from '../lib/trackid.js';
-import { archive, parseArchiveId } from '../lib/sources/archive.js';
-import { REGISTRY } from '../registry.js';
-import { MEDIA_RETRIES, PROXY_AUDIO } from '../config.js';
+import { resolve } from '../lib/resolve.js';
+import { MEDIA_RETRIES, PROXY_AUDIO, SEARCH_TIMEOUT_MS } from '../config.js';
 import { json, notFound, log } from '../utils/response.js';
 const { delay } = await import('node:timers/promises');
 
@@ -24,21 +22,6 @@ export function idFromPath(pathname, prefix) {
   }
 }
 
-export async function resolve(id, tier, signal) {
-  const parsed = parseTrackId(id);
-  if (!parsed) throw new NotFound('not an id this addon issued');
-
-  const source = REGISTRY.get(parsed.source);
-  if (!source) throw new NotFound(`unknown source "${parsed.source}"`);
-
-  if (source === archive) {
-    const parts = parseArchiveId(id);
-    if (!parts) throw new NotFound('malformed archive id');
-    return { source: source.id, result: await source.resolve(parts.filename, tier, parts, signal) };
-  }
-  return { source: source.id, result: await source.resolve(parsed.nativeId, tier, signal) };
-}
-
 export async function handleMedia(req, res, url) {
   if (!PROXY_AUDIO) {
     return json(res, 404, {
@@ -52,7 +35,13 @@ export async function handleMedia(req, res, url) {
 
   let resolved;
   try {
-    resolved = await resolve(id, parseTier(url.searchParams.get('quality')));
+    // Same budget as `/stream`, because this is the same resolution and may be
+    // the same failover walk; a proxy fetch gets its own deadline below.
+    resolved = await resolve(
+      id,
+      parseTier(url.searchParams.get('quality')),
+      AbortSignal.timeout(SEARCH_TIMEOUT_MS * 2),
+    );
   } catch (error) {
     if (error instanceof NotFound) return notFound(res, error.message);
     return json(res, 502, { error: 'UPSTREAM_UNAVAILABLE', message: error.message });

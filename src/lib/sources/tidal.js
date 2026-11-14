@@ -18,31 +18,35 @@
  * What it does not do is describe itself. The response is
  * `application/octet-stream` with no extension and nothing about the audio
  * inside, so `probe.js` reads the FLAC header to answer for it.
+ *
+ * ## Relationship to the Monochrome source
+ *
+ * Both read `tracks.monochrome.st`, and that is not a duplicate: this one asks
+ * the canonical index directly and accepts only what it can resolve
+ * progressively, while `monochrome` also walks the public instances and knows
+ * about DASH and previews. This source is the fast, predictable half; that one is
+ * the thorough half. When the index is up they agree, and when it is down this
+ * one reports so through `/health` rather than failing silently.
  */
 
-import { STREAMINFO_BYTES, parseFlacStreamInfo, flacKbps } from '../flac.js';
-import { httpJson, httpGet, TtlCache, NotFound } from '../http.js';
+import { probeFlac } from '../probe.js';
+import { httpJson, TtlCache, NotFound, UpstreamError } from '../http.js';
 
-const BASE = process.env.TIDAL_BASE_URL || 'https://tracks.monochrome.st';
-
-/**
- * STREAMINFO cannot change for a given recording, and the `/track/{id}` URL is
- * stable, so this is cached for the life of the process rather than on a TTL.
- * A restart is the only thing that re-reads it.
- */
-const probeCache = new TtlCache(4_000);
+const BASE = (process.env.TIDAL_BASE_URL || 'https://tracks.monochrome.st').replace(/\/+$/, '');
 
 /** Search rows change; keep them briefly so a queue re-ask is free. */
 const searchCache = new TtlCache(2_000);
 const SEARCH_TTL_MS = 5 * 60 * 1000;
+
+const MAX_ROWS = 25;
 
 /**
  * Keep only absolute http(s) artwork URLs; Monochrome's proxy URLs are already
  * absolute, so nothing is rewritten here.
  */
 function artwork(url) {
-  if (!url) return undefined;
-  return String(url).startsWith('http') ? String(url) : undefined;
+  const text = String(url ?? '').trim();
+  return /^https?:\/\//i.test(text) ? text : undefined;
 }
 
 /**
@@ -55,6 +59,38 @@ function seconds(ms) {
   const value = Number(ms);
   if (!Number.isFinite(value) || value <= 0) return undefined;
   return Math.round(value / 100) / 10;
+}
+
+/** A search row, or null. Ids must be numeric: nothing else can be resolved. */
+function mapTrack(item) {
+  const id = String(item?.id ?? '').trim();
+  const title = String(item?.title ?? '').trim();
+  if (!/^\d+$/.test(id) || !title) return null;
+
+  const hiRes =
+    (Array.isArray(item?.artistNames) && Array.isArray(item?.mediaMetadata?.tags) &&
+      item.mediaMetadata.tags.includes('HIRES_LOSSLESS')) ||
+    /hi-?res/i.test(String(item?.audioQuality ?? ''));
+
+  return {
+    id: `tidal:${id}`,
+    title,
+    artist: Array.isArray(item.artistNames)
+      ? item.artistNames.join(', ')
+      : String(item.artistNames ?? item?.artist?.name ?? ''),
+    // Monochrome's index does not say which release a row came from, and
+    // BitChord's matcher treats a missing album as "unknown" rather than
+    // "wrong" — which is the correct thing for it to treat it as.
+    album: '',
+    duration: seconds(item.duration),
+    artworkURL: artwork(item.artwork),
+    format: 'flac',
+    audioQuality: hiRes ? 'HI_RES_LOSSLESS' : 'LOSSLESS',
+    albumArtworkURL: undefined,
+    _source: 'tidal',
+    _nativeId: id,
+    _isrc: item.isrc,
+  };
 }
 
 export const tidal = {
@@ -73,117 +109,85 @@ export const tidal = {
     const text = String(query ?? '').trim();
     if (!text) return [];
 
-    return searchCache.wrap(`tidal:${text.toLowerCase()}:${limit}`, SEARCH_TTL_MS, async () => {
-      const url =
-        `${BASE}/search/tracks?q=${encodeURIComponent(text)}` +
-        `&limit=${Math.min(Math.max(limit, 1), 50)}`;
+    const capped = Math.min(Math.max(Number(limit) || 20, 1), MAX_ROWS);
 
-      const payload = await httpJson(url, { timeoutMs: 12_000, signal });
+    return searchCache.wrap(`tidal:${text.toLowerCase()}:${capped}`, SEARCH_TTL_MS, async () => {
+      const payload = await httpJson(
+        `${BASE}/search/tracks?q=${encodeURIComponent(text)}&limit=${capped}`,
+        { timeoutMs: 12_000, signal },
+      );
       const tracks = Array.isArray(payload?.tracks) ? payload.tracks : [];
 
-      return tracks
+      const rows = [];
+      const seen = new Set();
+      for (const item of tracks) {
         // `playable: false` is Monochrome's own statement that the catalogue has
         // the metadata but no stream behind it. Handing those to BitChord spends
         // a `/stream` round trip to learn nothing.
-        .filter((t) => t && t.playable !== false)
-        .map((t) => ({
-          id: `tidal:${t.id}`,
-          title: String(t.title ?? '').trim(),
-          artist: Array.isArray(t.artistNames) ? t.artistNames.join(', ') : String(t.artistNames ?? ''),
-          album: '',
-          duration: seconds(t.duration),
-          artworkURL: artwork(t.artwork),
-          format: 'flac',
-          audioQuality: 'LOSSLESS',
-          // Monochrome's index does not say which release a row came from, and
-          // BitChord's matcher treats a missing album as "unknown" rather than
-          // "wrong" — which is the correct thing for it to treat it as.
-          albumArtworkURL: undefined,
-          _source: this.id,
-          _nativeId: String(t.id),
-          _isrc: t.isrc,
-        }))
-        .filter((row) => row.title.length > 0);
+        if (item?.playable === false) continue;
+        const row = mapTrack(item);
+        if (!row || seen.has(row.id)) continue;
+        seen.add(row.id);
+        rows.push(row);
+        if (rows.length >= capped) break;
+      }
+      return rows;
     });
   },
 
   /**
    * Resolves one track to a FLAC URL plus what is genuinely known about it.
    *
+   * The probe is the whole answer: this catalogue describes nothing, so what the
+   * bytes say is what the row is labelled with. Where the header cannot be read
+   * — a CDN that refuses the range request, a format change — this throws rather
+   * than returning a URL it cannot vouch for, which is what sends the row into
+   * failover where another catalogue may hold it.
+   *
    * @param {string} nativeId
    * @param {string} tier BitChord's normalised tier
    */
   async resolve(nativeId, tier, signal) {
     const id = String(nativeId ?? '').trim();
-    if (!id) throw new NotFound('no track id');
+    if (!/^\d+$/.test(id)) throw new NotFound('no Tidal track id');
 
     // Asking for the tier costs nothing and is what the catalogue expects; the
     // probe below reports what actually arrived regardless of what was asked
     // for, which is the whole point of it.
     const quality = tier === 'LOSSLESS' ? 'LOSSLESS' : tier;
     const url = `${BASE}/track/${encodeURIComponent(id)}` +
-      (quality ? `?quality=${encodeURIComponent(quality)}` : '');
+      `?quality=${encodeURIComponent(quality)}`;
 
-    const probe = await this.probe(url, id, signal);
+    // A rate limit is thrown rather than converted into a miss: the catalogue
+    // has the file, it is asking to be asked again later, and reporting that as
+    // "not held" is the one answer that loses the track.
+    const answered = await probeFlac(url, {
+      cacheKey: `tidal:${id}:${quality}`,
+      signal,
+    });
+
+    if (!answered) {
+      // Distinguishing "not FLAC" from "the CDN did not answer" matters: the
+      // first is this catalogue serving something it did not promise, the second
+      // is a transient failure another source may not share.
+      throw new UpstreamError(
+        `Tidal index served no readable FLAC for track ${id}`,
+        { retryable: true },
+      );
+    }
 
     return {
-      url,
-      codec: 'flac',
-      container: 'flac',
+      url: answered.url,
+      codec: answered.codec,
+      container: answered.container,
       manifest: 'none',
       encrypted: false,
-      // Only ever filled in when the header was actually read. A field guessed
-      // at is worse than the field absent, which BitChord reads as "unknown"
-      // and this addon has no reason to misstate.
-      sampleRate: probe?.sampleRate ?? null,
-      bitDepth: probe?.bitDepth ?? null,
-      bitrate: probe ? flacKbps(probe.byteLength, probe.durationSec) : null,
-      channels: probe?.channels ?? null,
-      probed: Boolean(probe),
-      error: probe ? undefined : 'served, but the FLAC header could not be read',
+      sampleRate: answered.sampleRate,
+      bitDepth: answered.bitDepth,
+      bitrate: answered.bitrate,
+      channels: answered.channels,
+      probed: true,
     };
-  },
-
-  /**
-   * Reads the first bytes of the media URL and parses STREAMINFO.
-   *
-   * Deliberately cheap and deliberately once: a range request for 42 bytes
-   * against a file this addon does not read a byte of otherwise. Everything it
-   * learns is a property of the file, so the result is held for the process.
-   *
-   * Returns null when the bytes are not FLAC, which is the signal that this URL
-   * must not be labelled lossless.
-   */
-  async probe(url, cacheKey, signal) {
-    return probeCache.wrap(`probe:${cacheKey}`, Number.MAX_SAFE_INTEGER, async () => {
-      let response;
-      try {
-        response = await httpGet(url, {
-          timeoutMs: 12_000,
-          retries: 1,
-          range: `bytes=0-${STREAMINFO_BYTES - 1}`,
-          signal,
-        });
-      } catch {
-        return null;
-      }
-
-      const head = Buffer.from(await response.arrayBuffer());
-      const info = parseFlacStreamInfo(head);
-      if (!info) return null;
-
-      // `Content-Range: bytes 0-41/43704112` is the only place the byte count is
-      // published. Without it the bitrate is genuinely unknown rather than
-      // merely unstated, and is left absent.
-      const contentRange = response.headers.get('content-range') ?? '';
-      const slash = contentRange.lastIndexOf('/');
-      const total = slash >= 0 ? Number(contentRange.slice(slash + 1)) : NaN;
-
-      return {
-        ...info,
-        byteLength: Number.isFinite(total) && total > 0 ? total : null,
-      };
-    });
   },
 
   /**

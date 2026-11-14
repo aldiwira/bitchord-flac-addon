@@ -1,4 +1,5 @@
 import { settleAll, parseTier } from '../lib/http.js';
+import { carryRowId } from '../lib/failover.js';
 import { ACTIVE } from '../registry.js';
 import { MAX_ROWS, SEARCH_TIMEOUT_MS } from '../config.js';
 import { json, log } from '../utils/response.js';
@@ -45,14 +46,19 @@ export async function search(query, limit, signal) {
 /**
  * Reduces a row to the wire shape BitChord reads.
  *
- * Only fields from `AddonTrack` are emitted. Everything prefixed `_` is this
- * addon's own bookkeeping — the source name and native handle it needs to
- * resolve the row later — and BitChord's parser ignores unknown keys, so sending
- * it is harmless but sending nothing it cannot use is better.
+ * Only fields from `AddonTrack` are emitted. Everything prefixed `_` is a
+ * source's own bookkeeping and is dropped here: it is this addon's internal
+ * handle, not something BitChord can use.
+ *
+ * The `id` is the one field that is not the source's. BitChord puts it into
+ * `/stream/{id}` as the only thing this addon will receive back, and `/stream`
+ * needs the title, artist and duration to fail over to another catalogue — so
+ * they travel inside the id. See `lib/failover.js` for why that container is the
+ * cheapest place to put them.
  */
 export function wireRow(row) {
   return {
-    id: row.id,
+    id: carryRowId(row),
     title: row.title,
     artist: row.artist ?? '',
     album: row.album ?? '',

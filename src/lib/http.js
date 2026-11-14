@@ -106,7 +106,14 @@ export async function httpGet(url, opts = {}) {
   throw lastError ?? new UpstreamError(`${url} did not answer`);
 }
 
-/** `httpGet` plus a JSON parse, with the body size capped. */
+/**
+ * `httpGet` plus a JSON parse, with the body size capped.
+ *
+ * `preserveIntegers` exists for NetEase, whose `picId` values exceed
+ * `Number.MAX_SAFE_INTEGER`: left as numbers they silently round (…125 becomes
+ * …130) and address a different album's cover. With it, integers above the safe
+ * range come back as decimal strings and everything else parses unchanged.
+ */
 export async function httpJson(url, opts = {}) {
   const response = await httpGet(url, {
     ...opts,
@@ -117,7 +124,11 @@ export async function httpJson(url, opts = {}) {
     throw new UpstreamError(`${url} returned an empty body`, { retryable: false });
   }
   try {
-    return JSON.parse(text);
+    if (!opts.preserveIntegers) return JSON.parse(text);
+    // Quoting has to happen before the parse: by the time a reviver runs the
+    // digits are already gone. Any integer too long to be a safe double is
+    // quoted, which changes its type but keeps its value exact.
+    return JSON.parse(text.replace(/:\s*(-?\d{16,})(?=\s*[,}])/g, ': "$1"'));
   } catch (error) {
     // A captive portal or an HTML error page is the usual cause, and both are
     // the source being wrong rather than us.
@@ -193,6 +204,10 @@ export class TtlCache {
 
   get size() {
     return this.#entries.size;
+  }
+
+  clear() {
+    this.#entries.clear();
   }
 }
 

@@ -1,4 +1,4 @@
-import { test, describe } from 'node:test';
+import { test, describe, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { parseFlacStreamInfo, flacKbps, STREAMINFO_BYTES } from '../src/lib/flac.js';
@@ -267,44 +267,582 @@ describe('cleanSegment', () => {
   });
 });
 
-import { httpsUrl, seconds, normalizeCodec, mapSong } from '../src/lib/sources/netease.js';
+import {
+  songIdFromUrl,
+  codecFromUrl,
+  albumFromDetail,
+  mapNeteaseRow,
+  mapMetingRow,
+  withAlbums,
+  songsPayload,
+} from '../src/lib/sources/netease.js';
 
-describe('NetEase helpers', () => {
-  test('seconds converts NetEase milliseconds', () => {
-    assert.equal(seconds(171549), 171.5);
-    assert.equal(seconds(0), undefined);
-    assert.equal(seconds('nope'), undefined);
+describe('NetEase v2 (Meting) helpers', () => {
+  test('reads the NetEase id out of a Meting url', () => {
+    assert.equal(
+      songIdFromUrl('https://api.qijieya.cn/meting/?server=netease&type=url&id=210049'),
+      '210049',
+    );
+    assert.equal(songIdFromUrl('nonsense'), undefined);
+    assert.equal(songIdFromUrl('https://x/?type=url'), undefined);
   });
 
-  test('httpsUrl upgrades NetEase artwork and stream URLs', () => {
-    assert.equal(httpsUrl('http://p1.music.126.net/a.jpg'), 'https://p1.music.126.net/a.jpg');
-    assert.equal(httpsUrl('https://p1.music.126.net/a.jpg'), 'https://p1.music.126.net/a.jpg');
-    assert.equal(httpsUrl(''), undefined);
+  test('reads the codec from the redirected CDN path', () => {
+    assert.equal(codecFromUrl('https://m8.music.126.net/x/y.flac'), 'flac');
+    assert.equal(codecFromUrl('https://m8.music.126.net/x/y.mp3'), 'mp3');
+    assert.equal(codecFromUrl('https://api.qijieya.cn/meting/?type=url&id=1'), undefined);
   });
 
-  test('normalizeCodec trusts the declared type, then the URL extension', () => {
-    assert.equal(normalizeCodec('MP3', 'https://x/y.flac'), 'mp3');
-    assert.equal(normalizeCodec('', 'https://x/y.flac'), 'flac');
-    assert.equal(normalizeCodec(undefined, 'https://x/y'), 'mp3');
-  });
-
-  test('mapSong produces a BitChord row with an honest MP3 label', () => {
-    const row = mapSong({
-      id: 3455090425,
-      name: 'TEST ME',
-      ar: [{ name: 'Artist' }],
-      al: { name: 'Album', picUrl: 'http://p1.music.126.net/a.jpg' },
-      dt: 171549,
+  test('mapNeteaseRow builds a complete row — album and duration come with the search', () => {
+    const row = mapNeteaseRow({
+      id: 2630609057,
+      name: 'Wirang',
+      artists: [{ name: 'Denny Caknan' }],
+      album: { name: 'Wirang', picId: '109951169991174125', picUrl: null },
+      duration: 318206,
     });
-    assert.equal(row.id, 'netease:3455090425');
-    assert.equal(row.title, 'TEST ME');
-    assert.equal(row.artist, 'Artist');
-    assert.equal(row.album, 'Album');
-    assert.equal(row.duration, 171.5);
+    assert.equal(row.id, 'netease:2630609057');
+    assert.equal(row.title, 'Wirang');
+    assert.equal(row.artist, 'Denny Caknan');
+    assert.equal(row.album, 'Wirang');
+    assert.equal(row.duration, 318.2);
+    assert.ok(row.artworkURL.includes('type=pic&id=109951169991174125'),
+      'a null picUrl must fall back to the picId Meting dereferences');
+    assert.equal(row._nativeId, '2630609057');
+  });
+
+  test('mapNeteaseRow prefers a real picUrl and drops unusable entries', () => {
+    const row = mapNeteaseRow({
+      id: 1,
+      name: 'x',
+      album: { name: 'A', picUrl: 'http://p1.music.126.net/a.jpg' },
+    });
     assert.equal(row.artworkURL, 'https://p1.music.126.net/a.jpg');
-    assert.equal(row.format, 'mp3');
-    assert.equal(row.audioQuality, 'HIGH');
+    assert.equal(row.duration, undefined, 'NetEase often sends no duration');
+    // A falsy id is how NetEase marks a match it cannot serve.
+    assert.equal(mapNeteaseRow({ id: 0, name: 'x' }), null);
+    assert.equal(mapNeteaseRow({ id: 1, name: '  ' }), null);
+  });
+
+  test('mapMetingRow produces a lossless row from Meting metadata', () => {
+    const row = mapMetingRow({
+      name: '布拉格广场',
+      artist: '蔡依林/周杰伦',
+      url: 'https://api.qijieya.cn/meting/?server=netease&type=url&id=210049',
+      pic: 'http://p1.music.126.net/a.jpg',
+    });
+    assert.equal(row.id, 'netease:210049');
+    assert.equal(row.title, '布拉格广场');
+    assert.equal(row.artist, '蔡依林, 周杰伦');
+    assert.equal(row.album, '');
+    assert.equal(row.artworkURL, 'https://p1.music.126.net/a.jpg');
+    assert.equal(row.format, 'flac');
+    assert.equal(row.audioQuality, 'LOSSLESS');
     assert.equal(row._source, 'netease');
-    assert.equal(row._nativeId, '3455090425');
+    assert.equal(row._nativeId, '210049');
+  });
+
+  test('mapMetingRow drops a row with no id or title', () => {
+    assert.equal(mapMetingRow({ name: 'x' }), null);
+    assert.equal(mapMetingRow({ url: 'https://x/?type=url' }), null);
+  });
+
+  test('withAlbums keeps every row when the album lookup failed', () => {
+    // The bug this guards: a failed album call must cost the album, never the
+    // row. An empty map has to be a no-op rather than a filter.
+    const rows = [
+      { _nativeId: '1', album: '', artworkURL: 'https://p1.music.126.net/pic.jpg' },
+      { _nativeId: '2', album: '', artworkURL: undefined },
+    ];
+    assert.deepEqual(withAlbums(rows, new Map()), rows);
+    assert.deepEqual(withAlbums(rows, new Map([['2', { album: 'Wirang' }]])), [
+      rows[0],
+      { _nativeId: '2', album: 'Wirang', artworkURL: undefined },
+    ]);
+    // An album with no artwork must not erase the artwork the row already had.
+    assert.deepEqual(
+      withAlbums([rows[0]], new Map([['1', { album: 'Wirang' }]])),
+      [{ _nativeId: '1', album: 'Wirang', artworkURL: 'https://p1.music.126.net/pic.jpg' }],
+    );
+  });
+
+  test('songsPayload numbers ids and de-duplicates them', () => {
+    assert.deepEqual(songsPayload(['1', '2', '1']), [1, 2]);
+    assert.deepEqual(songsPayload([]), []);
+  });
+
+  test('reads the album out of either detail shape, because NetEase has two', () => {
+    // `/api/song/detail` nests `album`; the v3 endpoint nests `al`. Both are
+    // live on the public host depending on the request, so both must parse.
+    assert.deepEqual(
+      albumFromDetail({ album: { name: '看我72变', picUrl: 'http://p1.music.126.net/a.jpg' } }),
+      { album: '看我72变', artworkURL: 'https://p1.music.126.net/a.jpg' },
+    );
+    assert.deepEqual(
+      albumFromDetail({ al: { name: 'Promise', picUrl: 'http://p1.music.126.net/b.jpg' } }),
+      { album: 'Promise', artworkURL: 'https://p1.music.126.net/b.jpg' },
+    );
+    assert.deepEqual(albumFromDetail({ id: 1 }), { album: '', artworkURL: undefined });
+    assert.deepEqual(albumFromDetail(null), { album: '', artworkURL: undefined });
   });
 });
+
+import { httpJson } from '../src/lib/http.js';
+import { createServer } from 'node:http';
+
+describe('httpJson preserveIntegers', () => {
+  /** A one-shot server, because the behaviour under test is in the parse. */
+  const serve = (body) =>
+    new Promise((resolve) => {
+      const server = createServer((req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(body);
+      });
+      server.listen(0, '127.0.0.1', () =>
+        resolve({ url: `http://127.0.0.1:${server.address().port}/`, server }),
+      );
+    });
+
+  test('keeps an id past MAX_SAFE_INTEGER exact instead of rounding it', async () => {
+    // The bug: NetEase sends picId 109951169991174125, plain JSON.parse turns it
+    // into 109951169991174130, and that id resolves to a different album's cover.
+    const body = '{"album":{"picId":109951169991174125,"name":"x"},"duration":318206}';
+    const { url, server } = await serve(body);
+    try {
+      const exact = await httpJson(url, { preserveIntegers: true });
+      assert.equal(exact.album.picId, '109951169991174125');
+
+      const lossy = await httpJson(url);
+      assert.equal(lossy.album.picId, 109951169991174130, 'the rounding this guards');
+      assert.equal(lossy.duration, 318206, 'ordinary numbers stay numbers');
+      assert.equal(exact.duration, 318206);
+      assert.equal(exact.album.name, 'x', 'strings are untouched');
+    } finally {
+      server.close();
+    }
+  });
+
+  test('quotes only integers, never digits inside a string', async () => {
+    const { url, server } = await serve('{"url":"https://x/?id=12345678901234567","n":1}');
+    try {
+      const parsed = await httpJson(url, { preserveIntegers: true });
+      assert.equal(parsed.url, 'https://x/?id=12345678901234567');
+      assert.equal(parsed.n, 1);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+import { carryRowId, parseCarryId, pickMatch, norm, artistsOverlap } from '../src/lib/failover.js';
+
+describe('carried track ids', () => {
+  const row = {
+    id: 'tidal:154049681742106624',
+    title: 'One More Time',
+    artist: 'Daft Punk',
+    duration: 320,
+  };
+
+  test('round-trips the metadata a failover needs', () => {
+    const carried = parseCarryId(carryRowId(row));
+    assert.deepEqual(carried, {
+      source: 'tidal',
+      rowId: 'tidal:154049681742106624',
+      title: 'One More Time',
+      artist: 'Daft Punk',
+      duration: 320,
+    });
+  });
+
+  test('is safe as a single path segment', () => {
+    // BitChord puts this into `/stream/{id}` as one segment; anything that would
+    // be decoded back into a delimiter must not survive as itself.
+    const id = carryRowId({ ...row, title: 'A/B ? C# D', artist: 'Ünicode & Co' });
+    assert.ok(!/[?#\s]/.test(id), id);
+    assert.ok(!id.slice(id.indexOf(':') + 1).includes('/'), id);
+    assert.equal(parseCarryId(id).title, 'A/B ? C# D');
+  });
+
+  test('carries the archive id whole, because it is two parts', () => {
+    const archiveRow = {
+      id: 'archive:some-identifier:ZmlsZW5hbWUuZmxhYw',
+      title: 'So What',
+      artist: 'Miles Davis',
+      duration: 547,
+    };
+    const carried = parseCarryId(carryRowId(archiveRow));
+    assert.equal(carried.rowId, archiveRow.id, 'the identifier must survive');
+    assert.equal(carried.source, 'archive');
+  });
+
+  test('refuses ids this addon did not issue', () => {
+    for (const id of [
+      'tidal:154049681742106624',
+      '',
+      'no-separator',
+      'tidal:not-json',
+      `tidal:${Buffer.from('{"v":99,"r":"tidal:1","t":"x"}').toString('base64url')}`,
+      `tidal:${Buffer.from('{"v":1,"r":"tidal:1","t":"  "}').toString('base64url')}`,
+    ]) {
+      assert.equal(parseCarryId(id), null, `should refuse ${id}`);
+    }
+  });
+
+  test('hands back an id it cannot wrap rather than inventing one', () => {
+    assert.equal(carryRowId({ id: 'nonsense', title: 'x' }), 'nonsense');
+  });
+});
+
+describe('pickMatch', () => {
+  const meta = { title: 'One More Time', artist: 'Daft Punk', duration: 320 };
+
+  test('accepts the same recording and rejects a different one', () => {
+    const rows = [
+      { id: 'a', title: 'One More Time', artist: 'Daft Punk', duration: 321 },
+      { id: 'b', title: 'One More Time (Live)', artist: 'Daft Punk', duration: 320 },
+      { id: 'c', title: 'One More Time', artist: 'Someone Else', duration: 320 },
+      { id: 'd', title: 'One More Time', artist: 'Daft Punk', duration: 900 },
+    ];
+    assert.equal(pickMatch(rows, meta).id, 'a');
+  });
+
+  test('refuses a match when only one side states a duration it disagrees with', () => {
+    // A live version is 9 minutes. The duration is what catches it; the title
+    // alone would not.
+    assert.equal(
+      pickMatch([{ id: 'a', title: 'One More Time', artist: 'Daft Punk', duration: 540 }], meta),
+      null,
+    );
+  });
+
+  test('accepts a match when neither side states a duration', () => {
+    assert.equal(
+      pickMatch([{ id: 'a', title: 'One More Time', artist: 'Daft Punk' }], meta).id,
+      'a',
+    );
+  });
+
+  test('returns null for no rows and for an unusable title', () => {
+    assert.equal(pickMatch([], meta), null);
+    assert.equal(pickMatch(null, meta), null);
+    assert.equal(pickMatch([{ id: 'a', title: 'x', artist: 'Daft Punk' }], { ...meta, title: '' }), null);
+  });
+
+  test('folds an accent rather than requiring the same spelling', () => {
+    const row = { id: 'a', title: 'Jóga', artist: 'Björk', duration: 300 };
+    assert.equal(pickMatch([row], { title: 'Joga', artist: 'Bjork', duration: 300 }).id, 'a');
+  });
+});
+
+describe('artist strings', () => {
+  test('overlap in either order, which is how catalogues disagree', () => {
+    assert.ok(artistsOverlap('Timbaland, Justin Timberlake', 'Justin Timberlake, Timbaland'));
+    assert.ok(artistsOverlap('Justin Timberlake feat. Timbaland', 'Justin Timberlake'));
+  });
+
+  test('accept a reversed "Last, First" credit', () => {
+    assert.ok(artistsOverlap('Davis, Miles', 'Miles Davis'));
+  });
+
+  test('do not overlap when the artists differ', () => {
+    assert.equal(artistsOverlap('Daft Punk', 'Miles Davis'), false);
+    assert.equal(artistsOverlap('', 'Daft Punk'), false);
+  });
+
+  test('norm drops release qualifiers and featured credits', () => {
+    assert.equal(norm('One More Time (Remastered 2021)'), 'one more time');
+    assert.equal(norm('Song [Deluxe Edition]'), 'song');
+    assert.equal(norm('Song feat. Someone'), 'song');
+  });
+});
+
+import { failover, clearMatchCache } from '../src/lib/failover.js';
+import { NotFound, UpstreamError } from '../src/lib/http.js';
+import { ACTIVE } from '../src/registry.js';
+
+describe('failover', () => {
+  // The match cache is process-wide. Each scenario below asserts a different
+  // outcome for the same recording, so it must not serve one scenario's answer
+  // to the next.
+  beforeEach(() => clearMatchCache());
+
+  // A fixed three-catalogue world, injected rather than read from `ACTIVE`, so
+  // the walk is exercised in full whatever `SOURCES` the process was started
+  // with. Names match real registry ids so the assertions read like the log.
+  const tidal = { id: 'tidal' };
+  const netease = { id: 'netease' };
+  const archive = { id: 'archive' };
+  const sources = [tidal, netease, archive];
+
+  const carried = {
+    source: 'tidal',
+    rowId: 'tidal:154049681742106624',
+    title: 'One More Time',
+    artist: 'Daft Punk',
+    duration: 320,
+  };
+
+  test('never leaves the issuing source when it can serve its own row', async () => {
+    const asked = [];
+    const searched = [];
+    const result = await failover(carried, 'LOSSLESS', undefined, {
+      sources,
+      searchAt: async (source) => {
+        searched.push(source.id);
+        return [];
+      },
+      resolveAt: async (source, rowId) => {
+        asked.push(source.id);
+        if (source.id !== 'tidal') throw new Error('should not have been asked');
+        assert.equal(rowId, 'tidal:154049681742106624', 'the real row id, not the container');
+        return { url: 'https://example/one.flac' };
+      },
+    });
+
+    assert.equal(result.source, 'tidal');
+    assert.equal(result.issuer, 'tidal');
+    assert.deepEqual(asked, ['tidal']);
+    assert.deepEqual(searched, [], 'no catalogue was searched when nothing failed');
+  });
+
+  test('walks to another source when its own misses, and reports which one served it', async () => {
+    const asked = [];
+    const result = await failover(carried, 'LOSSLESS', undefined, {
+      sources,
+      searchAt: async (source, query) => {
+        assert.equal(query, 'Daft Punk One More Time', 'the query is rebuilt from the id');
+        // Every candidate catalogue has the recording.
+        return [{ id: `${source.id}:999`, title: 'One More Time', artist: 'Daft Punk', duration: 321 }];
+      },
+      resolveAt: async (source, rowId) => {
+        asked.push(source.id);
+        if (source.id === 'tidal') throw new NotFound('index has metadata but no file');
+        assert.match(rowId, new RegExp(`^${source.id}:`), 'a candidate resolves its own row id');
+        return { url: `https://example/${source.id}.flac` };
+      },
+    });
+
+    assert.equal(result.source, 'netease', 'the first candidate in registry order won');
+    assert.equal(result.issuer, 'tidal', 'the issuing source is still reported');
+    assert.equal(result.rowId, 'netease:999');
+    assert.equal(result.result.url, 'https://example/netease.flac');
+    assert.deepEqual(asked, ['tidal', 'netease'], 'resolution stopped at the first success');
+  });
+
+  test('walks past a candidate that is broken, not only one that misses', async () => {
+    const result = await failover(carried, 'LOSSLESS', undefined, {
+      sources,
+      searchAt: async (source) => [
+        { id: `${source.id}:1`, title: 'One More Time', artist: 'Daft Punk', duration: 320 },
+      ],
+      resolveAt: async (source) => {
+        if (source.id === 'tidal') throw new NotFound('no file');
+        if (source.id === 'netease') throw new UpstreamError('connection reset');
+        return { url: 'https://example/archive.flac' };
+      },
+    });
+
+    assert.equal(result.source, 'archive', 'a broken candidate did not end the walk');
+  });
+
+  test('reports a miss when nothing in the addon holds the recording', async () => {
+    await assert.rejects(
+      () => failover(carried, 'LOSSLESS', undefined, {
+        sources,
+        searchAt: async () => [],
+        resolveAt: async () => {
+          throw new NotFound('no rendition');
+        },
+      }),
+      (error) => error instanceof NotFound,
+    );
+  });
+
+  test('never resolves a row no candidate matched, however desperate it is', async () => {
+    // The failure this guards: resolving the *first* open id rather than the one
+    // that is the same recording, which plays the wrong track instead of none.
+    const asked = [];
+    await assert.rejects(
+      () => failover(carried, 'LOSSLESS', undefined, {
+        sources,
+        searchAt: async () => [
+          { id: 'netease:1', title: 'One More Time (Live)', artist: 'Daft Punk', duration: 320 },
+          { id: 'netease:2', title: 'Around the World', artist: 'Daft Punk', duration: 320 },
+        ],
+        resolveAt: async (source, rowId) => {
+          asked.push(rowId);
+          throw new NotFound('no rendition');
+        },
+      }),
+      (error) => error instanceof NotFound,
+    );
+    assert.deepEqual(asked, ['tidal:154049681742106624'], 'only the own-source attempt');
+  });
+
+  test('skips the issuing source entirely when this process does not run it', async () => {
+    // A stale row from a deployment configured with a different `SOURCES`.
+    const asked = [];
+    const result = await failover({ ...carried, known: false }, 'LOSSLESS', undefined, {
+      sources,
+      searchAt: async (source) => [
+        { id: `${source.id}:1`, title: 'One More Time', artist: 'Daft Punk', duration: 320 },
+      ],
+      resolveAt: async (source) => {
+        asked.push(source.id);
+        return { url: 'https://example/x.flac' };
+      },
+    });
+
+    assert.ok(!asked.includes('tidal'), 'a source that is not configured must not be asked');
+    assert.equal(result.source, 'netease');
+  });
+});
+
+import { carryRowId as carry } from '../src/lib/failover.js';
+import { probeFlac, describeMedia, lossyAnswer } from '../src/lib/probe.js';
+import { ALIASES, REGISTRY } from '../src/registry.js';
+
+describe('catalogue-only sources', () => {
+  test('Deezer is registered without a resolve, which is what sends it to failover', () => {
+    const deezer = REGISTRY.get('deezer');
+    assert.ok(deezer, 'must be registered so its rows are recognised');
+    assert.equal(typeof deezer.resolve, 'undefined');
+    assert.equal(deezer.catalogueOnly, true);
+  });
+
+  test('resolving a deezer row is a miss, not a crash', async () => {
+    const { resolveAt } = await import('../src/lib/resolve.js');
+    await assert.rejects(
+      () => resolveAt(REGISTRY.get('deezer'), 'deezer:3135556', 'LOSSLESS'),
+      (error) => error instanceof NotFound,
+    );
+  });
+});
+
+describe('legacy id prefixes', () => {
+  test('an id minted under the old prefix is understood and re-minted canonically', () => {
+    // `qb:` was Qobuz, `mc:` Monochrome, `dz:` Deezer in an earlier deployment.
+    // The row is still in somebody's queue, so it must still resolve.
+    const carried = parseCarryId(
+      carry({ id: 'qb:13176085', title: 'So What', artist: 'Miles Davis', duration: 547 }),
+    );
+    assert.equal(carried.source, 'qobuz', 'the alias resolved to the canonical id');
+    assert.equal(carried.rowId, 'qobuz:13176085', 'and the id was re-minted canonically');
+  });
+
+  test('canonical ids are left exactly as they were', () => {
+    for (const [alias, canonical] of ALIASES) {
+      const row = { id: `${canonical}:42`, title: 'x', artist: 'y', duration: 1 };
+      const carried = parseCarryId(carry(row));
+      assert.equal(carried.rowId, `${canonical}:42`);
+      assert.notEqual(carried.source, alias);
+    }
+  });
+
+  test('a NeteaseCloudMusicApi row still resolves after that source was replaced', () => {
+    // The NeteaseCloudMusicApi source was replaced by the Meting one, which now
+    // lives in `netease.js` under the same `netease:` prefix — both name the
+    // same NetEase song id, so a row issued before the swap still arrives.
+    assert.ok(REGISTRY.has('netease'), 'the replacement must be registered');
+    const carried = parseCarryId(
+      carry({ id: 'netease:5257138', title: '屋顶', artist: '周杰伦', duration: 393 }),
+    );
+    assert.equal(carried.source, 'netease');
+    assert.equal(carried.rowId, 'netease:5257138');
+  });
+
+  test('no alias shadows a registered source id', () => {
+    // `/health` lists every registry key; an alias that is also a key would make
+    // one source appear twice and hide which one a prefix means.
+    for (const alias of ALIASES.keys()) assert.equal(REGISTRY.has(alias), false, alias);
+  });
+});
+
+describe('lossy answers', () => {
+  test('a non-FLAC answer is labelled, not refused', () => {
+    const answer = lossyAnswer('https://example/x.mp3', 'mp3');
+    assert.equal(answer.codec, 'mp3');
+    assert.equal(answer.encrypted, false);
+    assert.equal(answer.sampleRate, null, 'no claim about audio it did not read');
+    assert.equal(answer.probed, false);
+  });
+});
+
+describe('a throttle is not a miss', () => {
+  test('failover surfaces an unavailable candidate instead of claiming a miss', async () => {
+    // The bug this guards: a 429 from the one catalogue that has the recording
+    // was reported as 404, so BitChord moved on to another source and the track
+    // was lost — although asking again a minute later would have worked.
+    const tidal = { id: 'tidal' };
+    const netease = { id: 'netease' };
+    const carried = {
+      source: 'tidal',
+      rowId: 'tidal:1',
+      title: 'One More Time',
+      artist: 'Daft Punk',
+      duration: 320,
+    };
+
+    await assert.rejects(
+      () => failover(carried, 'LOSSLESS', undefined, {
+        sources: [tidal, netease],
+        searchAt: async () => [
+          { id: 'netease:1', title: 'One More Time', artist: 'Daft Punk', duration: 320 },
+        ],
+        resolveAt: async (source) => {
+          if (source.id === 'tidal') throw new NotFound('no file');
+          throw new UpstreamError('rate limited', { status: 429 });
+        },
+      }),
+      // NotFound would be a 404 to BitChord, which is the wrong claim.
+      (error) => !(error instanceof NotFound) && error.status === 429,
+    );
+  });
+
+  test('a throttled search does not poison the match cache', async () => {
+    const tidal = { id: 'tidal' };
+    const netease = { id: 'netease' };
+    const carried = {
+      source: 'tidal',
+      rowId: 'tidal:1',
+      title: 'One More Time',
+      artist: 'Daft Punk',
+      duration: 320,
+    };
+
+    clearMatchCache();
+
+    // First ask: the only candidate that has it is throttled.
+    await assert.rejects(
+      () => failover(carried, 'LOSSLESS', undefined, {
+        sources: [tidal, netease],
+        searchAt: async () => {
+          throw new UpstreamError('rate limited', { status: 429 });
+        },
+        resolveAt: async () => {
+          throw new NotFound('no file');
+        },
+      }),
+      (error) => error instanceof NotFound,
+    );
+
+    // Second ask: the throttle is gone and the recording is found. If the first
+    // attempt had cached its empty match set, this would return the stale empty.
+    const result = await failover(carried, 'LOSSLESS', undefined, {
+      sources: [tidal, netease],
+      searchAt: async (source) =>
+        source.id === 'netease'
+          ? [{ id: 'netease:1', title: 'One More Time', artist: 'Daft Punk', duration: 320 }]
+          : [],
+      // Tidal's own row still misses; only netease can serve it.
+      resolveAt: async (source) => {
+        if (source.id === 'tidal') throw new NotFound('no file');
+        return { url: 'https://example/ok.flac' };
+      },
+    });
+
+    assert.equal(result.source, 'netease', 'the throttle must not have been cached');
+  });
+});
+

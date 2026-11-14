@@ -1,7 +1,5 @@
 import { parseTier, NotFound, UpstreamError } from '../lib/http.js';
-import { parseTrackId } from '../lib/trackid.js';
-import { archive, parseArchiveId } from '../lib/sources/archive.js';
-import { REGISTRY } from '../registry.js';
+import { resolve } from '../lib/resolve.js';
 import { SEARCH_TIMEOUT_MS, PROXY_AUDIO, TOKEN } from '../config.js';
 import { json, notFound, log, publicOrigin } from '../utils/response.js';
 
@@ -15,24 +13,6 @@ export function idFromPath(pathname, prefix) {
   } catch {
     return raw;
   }
-}
-
-/**
- * Resolves one row id to something playable.
- */
-export async function resolve(id, tier, signal) {
-  const parsed = parseTrackId(id);
-  if (!parsed) throw new NotFound('not an id this addon issued');
-
-  const source = REGISTRY.get(parsed.source);
-  if (!source) throw new NotFound(`unknown source "${parsed.source}"`);
-
-  if (source === archive) {
-    const parts = parseArchiveId(id);
-    if (!parts) throw new NotFound('malformed archive id');
-    return { source: source.id, result: await source.resolve(parts.filename, tier, parts, signal) };
-  }
-  return { source: source.id, result: await source.resolve(parsed.nativeId, tier, signal) };
 }
 
 export function describeQuality(answer) {
@@ -58,7 +38,10 @@ export async function handleStream(req, res, url) {
   if (!id) return notFound(res, 'no track id in path');
 
   const tier = parseTier(url.searchParams.get('quality'));
-  const deadline = AbortSignal.timeout(SEARCH_TIMEOUT_MS);
+  // A failover walk can outlast a single search: it searches the other
+  // catalogues, then resolves against one of them. Twice the search budget
+  // covers that and is still inside the window BitChord keeps open.
+  const deadline = AbortSignal.timeout(SEARCH_TIMEOUT_MS * 2);
 
   let resolved;
   try {
@@ -76,9 +59,13 @@ export async function handleStream(req, res, url) {
   }
 
   const answer = resolved.result;
-  const proxied = PROXY_AUDIO;
   const extension = String(answer.container ?? answer.codec ?? 'flac').toLowerCase();
-  const playableUrl = proxied
+
+  // The proxy route takes the id BitChord sent, not the id that was resolved. It
+  // re-runs this same resolution, so a stream URL that moves to another
+  // catalogue is re-derived there rather than pinned to one that has expired by
+  // the time the player asks for the bytes.
+  const playableUrl = PROXY_AUDIO
     ? `${publicOrigin(req)}/media/${encodeURIComponent(id)}.${extension}` +
       (TOKEN ? `?token=${encodeURIComponent(TOKEN)}` : '')
     : answer.url;
@@ -87,10 +74,13 @@ export async function handleStream(req, res, url) {
     id,
     tier,
     source: resolved.source,
-    proxied,
-    probed: answer.probed,
+    // Only when the issuing catalogue could not serve its own row: names the
+    // catalogue that did, so a failover is visible in the log rather than
+    // looking like the row was served by the source it came from.
+    moved: resolved.source !== resolved.issuer ? resolved.issuer : undefined,
     sampleRate: answer.sampleRate,
     bitDepth: answer.bitDepth,
+    proxied: PROXY_AUDIO,
   });
 
   return json(res, 200, {
