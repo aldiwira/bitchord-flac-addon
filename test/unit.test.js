@@ -266,3 +266,45 @@ describe('cleanSegment', () => {
     assert.equal(cleanSegment('  spaced  '), 'spaced');
   });
 });
+
+import { httpsUrl, seconds, normalizeCodec, mapSong } from '../src/lib/sources/netease.js';
+
+describe('NetEase helpers', () => {
+  test('seconds converts NetEase milliseconds', () => {
+    assert.equal(seconds(171549), 171.5);
+    assert.equal(seconds(0), undefined);
+    assert.equal(seconds('nope'), undefined);
+  });
+
+  test('httpsUrl upgrades NetEase artwork and stream URLs', () => {
+    assert.equal(httpsUrl('http://p1.music.126.net/a.jpg'), 'https://p1.music.126.net/a.jpg');
+    assert.equal(httpsUrl('https://p1.music.126.net/a.jpg'), 'https://p1.music.126.net/a.jpg');
+    assert.equal(httpsUrl(''), undefined);
+  });
+
+  test('normalizeCodec trusts the declared type, then the URL extension', () => {
+    assert.equal(normalizeCodec('MP3', 'https://x/y.flac'), 'mp3');
+    assert.equal(normalizeCodec('', 'https://x/y.flac'), 'flac');
+    assert.equal(normalizeCodec(undefined, 'https://x/y'), 'mp3');
+  });
+
+  test('mapSong produces a BitChord row with an honest MP3 label', () => {
+    const row = mapSong({
+      id: 3455090425,
+      name: 'TEST ME',
+      ar: [{ name: 'Artist' }],
+      al: { name: 'Album', picUrl: 'http://p1.music.126.net/a.jpg' },
+      dt: 171549,
+    });
+    assert.equal(row.id, 'netease:3455090425');
+    assert.equal(row.title, 'TEST ME');
+    assert.equal(row.artist, 'Artist');
+    assert.equal(row.album, 'Album');
+    assert.equal(row.duration, 171.5);
+    assert.equal(row.artworkURL, 'https://p1.music.126.net/a.jpg');
+    assert.equal(row.format, 'mp3');
+    assert.equal(row.audioQuality, 'HIGH');
+    assert.equal(row._source, 'netease');
+    assert.equal(row._nativeId, '3455090425');
+  });
+});

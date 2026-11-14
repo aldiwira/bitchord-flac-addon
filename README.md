@@ -84,6 +84,7 @@ Two consequences, both deliberate:
 |---|---|---|---|
 | **Tidal** (via Monochrome's public index) | **none** | The commercial catalogue. `/search/tracks` for metadata, `/track/{id}` for the FLAC itself. | `fLaC` bytes, 206 range responses, `HEAD` OK |
 | **Internet Archive** | **none** | Freely-licensed recordings: live tapes, bootlegs, public-domain transfers, classical and jazz sets. | `fLaC` bytes, 963,908 items indexed |
+| **NetEase Cloud Music** (via a public NeteaseCloudMusicApi instance) | **none** | The Chinese catalogue. Anonymous playback is MP3/AAC, typically 128–320 kbps; FLAC only when the API instance itself is logged in. NetEase region-checks the caller, so the addon sends a default `realIP`. | `type:"mp3"`, ID3 bytes, 128–320 kbps |
 
 Both are CD quality — 44.1 kHz / 16-bit, which is bit-exact lossless. The Tidal
 index serves the same file whichever tier is asked for, so **24-bit/96 kHz Hi-Res
@@ -95,7 +96,6 @@ same experiment:
 
 | Source | Why not |
 |---|---|
-| NetEase Cloud Music | Search works anonymously with excellent metadata, but `/api/song/enhance/player/url/v1` returns `url: null` without a login cookie. A metadata-only source is not a playback source. |
 | Kuwo | `mobi.kuwo.cn` answered a FLAC request with `br=1` and served an MP3, and returned `code 407` ("not available in your region") for other tracks. |
 
 Monochrome's *other* public instances — `api.monochrome.tf`, the five `qqdl.site`
@@ -115,9 +115,11 @@ TIDAL_BASE_URL=https://some-other-instance.example node server.js
 |---|---|---|
 | `PORT` | `8787` | listen port |
 | `HOST` | `0.0.0.0` | bind address |
-| `SOURCES` | `tidal,archive` | which sources to ask, in priority order |
+| `SOURCES` | `tidalv2,tidal,archive` | which sources to ask, in priority order |
 | `PROXY` | `0` | `1` to serve audio through this host |
 | `ADDON_TOKEN` | unset | if set, `?token=` is required on every route |
+| `NETEASE_API_BASE` | `https://ncmapi.bixygames.com` | the NeteaseCloudMusicApi instance |
+| `NETEASE_REAL_IP` | `127.0.0.1` | address sent to NetEase; the public instance is overseas, where most tracks answer `code 404` |
 | `TIDAL_BASE_URL` | `https://tracks.monochrome.st` | the Tidal-backed index |
 
 Run Tidal alone — the fastest possible search, since the Archive's fan-out is
@@ -270,13 +272,15 @@ src/lib/http.js              timeouts, retries, caching, partial-failure handlin
 src/lib/trackid.js           ids that survive being put in a URL path segment
 src/lib/sources/tidal.js     Tidal via Monochrome's public index
 src/lib/sources/archive.js   Internet Archive
+src/lib/sources/netease.js   NetEase Cloud Music via a NeteaseCloudMusicApi instance
 src/scripts/contract-check.js live check against the rules BitChord enforces
 test/unit.test.js            parser, id codec, cache semantics
 ```
 
-Adding a source means writing one file exporting `search`, `resolve`, `mediaUrl`
-and `health`, and adding it to the `REGISTRY` map in `src/registry.js`. It is called in
-parallel with the others and its failure never fails a search.
+Adding a source means writing one file exporting `search`, `resolve` and
+`health`, and adding it to the `REGISTRY` map in `src/registry.js`; `mediaUrl` is
+only needed for catalogues with a stable audio URL. It is called in parallel
+with the others and its failure never fails a search.
 
 ---
 

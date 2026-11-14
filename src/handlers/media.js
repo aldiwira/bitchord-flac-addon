@@ -6,6 +6,15 @@ import { MEDIA_RETRIES, PROXY_AUDIO } from '../config.js';
 import { json, notFound, log } from '../utils/response.js';
 const { delay } = await import('node:timers/promises');
 
+const CONTENT_TYPES = {
+  flac: 'audio/flac',
+  mp3: 'audio/mpeg',
+  aac: 'audio/aac',
+  m4a: 'audio/mp4',
+  opus: 'audio/ogg',
+  ogg: 'audio/ogg',
+};
+
 export function idFromPath(pathname, prefix) {
   const raw = pathname.slice(prefix.length);
   try {
@@ -38,7 +47,8 @@ export async function handleMedia(req, res, url) {
     });
   }
 
-  const id = idFromPath(url.pathname, '/media/').replace(/\.flac$/i, '');
+  const id = idFromPath(url.pathname, '/media/')
+    .replace(/\.(flac|mp3|aac|m4a|opus|ogg)$/i, '');
 
   let resolved;
   try {
@@ -47,6 +57,8 @@ export async function handleMedia(req, res, url) {
     if (error instanceof NotFound) return notFound(res, error.message);
     return json(res, 502, { error: 'UPSTREAM_UNAVAILABLE', message: error.message });
   }
+
+  const codec = String(resolved.result.codec ?? 'flac').toLowerCase();
 
   const rangeHeader = req.headers.range;
   const clientWantsStart =
@@ -101,7 +113,7 @@ export async function handleMedia(req, res, url) {
 
   let first = Buffer.alloc(0);
   const reader = upstream.body.getReader();
-  if (clientWantsStart) {
+  if (clientWantsStart && codec === 'flac') {
     const chunk = await reader.read();
     first = chunk.value ? Buffer.from(chunk.value) : Buffer.alloc(0);
     if (first.subarray(0, 4).toString('ascii') !== 'fLaC') {
@@ -113,7 +125,7 @@ export async function handleMedia(req, res, url) {
     }
   }
 
-  headers['Content-Type'] = 'audio/flac';
+  headers['Content-Type'] = CONTENT_TYPES[codec] ?? 'application/octet-stream';
   res.writeHead(upstream.status, headers);
 
   try {

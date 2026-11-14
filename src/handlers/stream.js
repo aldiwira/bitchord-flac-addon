@@ -36,13 +36,21 @@ export async function resolve(id, tier, signal) {
 }
 
 export function describeQuality(answer) {
+  const codec = String(answer.codec ?? 'flac').toUpperCase();
+
   if (answer.sampleRate && answer.bitDepth) {
     const hires = answer.sampleRate > 48000 || answer.bitDepth > 16;
-    return `${hires ? 'Hi-Res' : 'Lossless'} FLAC · ${answer.bitDepth}-bit / ${
+    return `${hires ? 'Hi-Res' : 'Lossless'} ${codec} · ${answer.bitDepth}-bit / ${
       (answer.sampleRate / 1000).toFixed(1).replace(/\.0$/, '')
     } kHz`;
   }
-  return 'Lossless FLAC · bit depth read from the FLAC header';
+
+  if (codec === 'FLAC') {
+    return 'Lossless FLAC · bit depth read from the FLAC header';
+  }
+
+  const kbps = answer.bitrate ? ` · ${answer.bitrate} kbps` : '';
+  return `${codec}${kbps}`;
 }
 
 export async function handleStream(req, res, url) {
@@ -69,8 +77,9 @@ export async function handleStream(req, res, url) {
 
   const answer = resolved.result;
   const proxied = PROXY_AUDIO;
+  const extension = String(answer.container ?? answer.codec ?? 'flac').toLowerCase();
   const playableUrl = proxied
-    ? `${publicOrigin(req)}/media/${encodeURIComponent(id)}.flac` +
+    ? `${publicOrigin(req)}/media/${encodeURIComponent(id)}.${extension}` +
       (TOKEN ? `?token=${encodeURIComponent(TOKEN)}` : '')
     : answer.url;
 
