@@ -90,14 +90,14 @@ const QUALITY_OPTIONS = [
 const ALLOW_DOWNLOADS = 1;
 
 export const MANIFEST = Object.freeze({
-  id: 'dev.oreomuncher45.bitchord.flac',
+  id: 'dev.onyourride.bitchord.flac',
   name: displayName(),
   version: VERSION,
   resources: ['search', 'stream'],
   allowDownloads: ALLOW_DOWNLOADS,
   // `off` is the only mode that leaves the flag out, because it is the only one
   // that does not check. Anything else declares it, `log` included.
-  ...(AUTH_MODE === 'off' ? {} : { bitchordAuth: true }),
+  bitchordAuth: !(AUTH_MODE === 'off'),
   settings: [
     {
       key: 'quality',

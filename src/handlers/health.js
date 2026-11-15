@@ -7,7 +7,6 @@ export async function handleHealth(req, res) {
     ACTIVE.map(async (source) => ({
       id: source.id,
       label: source.label,
-      ...(await source.health()),
     })),
   );
 
@@ -19,7 +18,6 @@ export async function handleHealth(req, res) {
     optionalRoutes: process.env.PROXY === '1' ? ['/media/{id}.flac'] : ['/media/{id}.flac (PROXY=0)'],
     proxyAudio: process.env.PROXY === '1',
     uptimeSec: Math.round((Date.now() - STARTED) / 1000),
-    node: process.version,
     sources,
   });
 }

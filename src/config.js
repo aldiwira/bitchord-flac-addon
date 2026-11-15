@@ -1,4 +1,4 @@
-export const VERSION = '1.0.0';
+export const VERSION = '2.0.0';
 
 export const PORT = Number(process.env.PORT ?? 8787);
 export const HOST = process.env.HOST ?? '0.0.0.0';
@@ -16,7 +16,7 @@ export const STARTED = Date.now();
  * declared flag that nothing checks would hide the app's "Outdated addon" note
  * while making a promise this server does not keep.
  */
-export const AUTH_MODE = String(process.env.BITCHORD_AUTH ?? 'enforce').trim().toLowerCase();
+export const AUTH_MODE = String(process.env.BITCHORD_AUTH ?? 'off').trim().toLowerCase();
 
 /**
  * The hostname(s) listeners paste into BitChord, comma-separated.
