@@ -94,7 +94,7 @@ Good enough to answer the question this project exists to answer: *can this
 device play FLAC at all?*
 
 ```bash
-SOURCES=tidal node server.js
+BITCHORD_AUTH=off SOURCES=tidal node server.js
 ```
 
 Find your LAN address:
@@ -117,9 +117,20 @@ Plain HTTP is fine on your own Wi-Fi, and BitChord will take it. No token needed
 for a home network, though you can set one:
 
 ```bash
-ADDON_TOKEN=$(openssl rand -hex 16) SOURCES=tidal node server.js
+ADDON_TOKEN=$(openssl rand -hex 16) BITCHORD_AUTH=off SOURCES=tidal node server.js
 # then paste:
 http://192.168.1.x:8787/manifest.json?token=…
+```
+
+### Addon auth, on a home network
+
+BitChord only sends its hardware-backed proof over **HTTPS**. On plain HTTP it
+cannot attach the headers, so an addon in `enforce` mode will refuse every
+request — and one in `off` mode is the only honest configuration there.
+
+```bash
+# plain HTTP on the LAN: the app cannot authenticate, so do not ask it to
+BITCHORD_AUTH=off SOURCES=tidal node server.js
 ```
 
 BitChord keeps the token in the URL you paste and appends it to every subsequent

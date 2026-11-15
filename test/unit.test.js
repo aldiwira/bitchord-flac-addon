@@ -854,7 +854,7 @@ describe('the manifest', () => {
     // ignoreUnknownKeys is on, so anything else is silently discarded — the
     // failure mode is a claim made to nobody, not a parse error.
     const known = ['id', 'name', 'version', 'resources', 'allowDownloads',
-      'checkValidLossless', 'settings'];
+      'checkValidLossless', 'bitchordAuth', 'settings'];
     for (const key of Object.keys(MANIFEST)) {
       assert.ok(known.includes(key), `"${key}" has no reader in AddonManifest`);
     }
@@ -939,5 +939,73 @@ describe('the Lossless Bridge source', () => {
     assert.equal(qobuzSeconds(320_400), 320, 'a relay sending ms is still read as seconds');
     assert.equal(qobuzSeconds(0), undefined);
     assert.equal(qobuzSeconds('nope'), undefined);
+  });
+});
+
+import { normalizeHost, parseHosts, createAuth } from '../src/lib/auth.js';
+import { AUTH_MODE } from '../src/config.js';
+
+describe('BitChord addon auth', () => {
+  test('hosts normalise to exactly what the app signs', () => {
+    // The app signs the hostname from the addon URL: lowercase, no scheme, port
+    // or path. A `Host` header value is never trusted, so this list is the only
+    // thing that makes verification succeed.
+    assert.equal(normalizeHost('HTTPS://Addon.Example.com:8443/path'), 'addon.example.com');
+    assert.equal(normalizeHost('addon.example.com.'), 'addon.example.com');
+    assert.equal(normalizeHost('  [::1]:8787 '), '::1');
+    assert.equal(normalizeHost('::1'), '::1', 'a bare IPv6 literal is not a host:port');
+  });
+
+  test('parses a comma- or space-separated list, without duplicates', () => {
+    assert.deepEqual(parseHosts('a.com, B.com  a.com'), ['a.com', 'b.com']);
+    assert.deepEqual(parseHosts(''), []);
+    assert.deepEqual(parseHosts('https://x.com/'), ['x.com']);
+  });
+
+  test('off does not declare the flag and never checks', async () => {
+    const auth = createAuth({ mode: 'off', hosts: ['a.com'] });
+    assert.equal(auth.mode, 'off');
+    assert.equal(auth.declares, false);
+    assert.deepEqual(await auth.check({ headers: {} }), { ok: true });
+  });
+
+  test('log declares the flag but lets an unauthenticated request through', async () => {
+    const auth = createAuth({ mode: 'log', hosts: ['a.com'] });
+    assert.equal(auth.declares, true);
+    const outcome = await auth.check({ headers: {} });
+    // The verifier says "missing"; log mode is the caller's decision to serve.
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.error, 'missing');
+    assert.equal(outcome.status, 401);
+  });
+
+  test('enforce refuses a request with no credentials, with the header the app reads', async () => {
+    const auth = createAuth({ mode: 'enforce', hosts: ['a.com'] });
+    const outcome = await auth.check({ headers: {} });
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.error, 'missing');
+    assert.match(outcome.headers['www-authenticate'], /^BitChord realm="bitchord-addons", error="missing"/);
+    assert.equal(JSON.parse(outcome.body).code, 'missing');
+  });
+
+  test('enforce without hosts is a startup failure, not a broken addon', () => {
+    // Every request would fail invalid_proof, and /health would still look fine.
+    assert.throws(() => createAuth({ mode: 'enforce', hosts: [] }), /BITCHORD_HOSTS/);
+    assert.throws(() => createAuth({ mode: 'enforce' }), /BITCHORD_HOSTS/);
+    // Log-only may run without hosts: it refuses nobody.
+    assert.doesNotThrow(() => createAuth({ mode: 'log', hosts: [] }));
+  });
+});
+
+describe('the manifest and the guard agree on the flag', () => {
+  test('bitchordAuth is declared exactly when the routes check it', () => {
+    // The bug this guards: declaring the flag with nothing verifying it would
+    // clear the app's "Outdated addon" note while making the promise false, and
+    // verifying with the flag absent would refuse clients that were never told
+    // to authenticate.
+    const declared = MANIFEST.bitchordAuth === true;
+    assert.equal(declared, AUTH_MODE !== 'off', `mode=${AUTH_MODE}`);
+    // `enforce` is the default, so the shipped manifest carries the flag.
+    assert.equal(MANIFEST.bitchordAuth ?? false, true);
   });
 });

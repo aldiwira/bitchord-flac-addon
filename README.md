@@ -79,9 +79,10 @@ Two consequences, both deliberate:
 ### What the manifest says, and what it deliberately does not
 
 `GET /manifest.json` is read into `AddonManifest`, which has five fields with a
-reader behind them: `id`, `name`, `version`, `resources`, `settings` — plus two
-switches, `allowDownloads` and `checkValidLossless`. Everything else is discarded
-on parse (`ignoreUnknownKeys = true`), so this addon sends nothing else.
+reader behind them: `id`, `name`, `version`, `resources`, `settings` — plus three
+switches, `allowDownloads`, `checkValidLossless` and `bitchordAuth`. Everything
+else is discarded on parse (`ignoreUnknownKeys = true`), so this addon sends
+nothing else.
 
 ```json
 {
@@ -90,6 +91,7 @@ on parse (`ignoreUnknownKeys = true`), so this addon sends nothing else.
   "version": "1.0.0",
   "resources": ["search", "stream"],
   "allowDownloads": 1,
+  "bitchordAuth": true,
   "settings": [
     { "key": "quality", "type": "select", "default": "lossless",
       "options": [
@@ -107,10 +109,12 @@ Three decisions in that object, all of them about not overstating:
   a Bluetooth headset, and whether the addon is worth asking is the listener's
   call. The addon serves lossless honestly; it does not need to police the
   output. `AddonPolicyTest` reads the absent key as *no output check*.
-- **`bitchordAuth` is absent.** It is a promise that every request carries a
-  hardware-signed proof. This service cannot verify one without the official
-  issuer's public keys, and a flag it cannot honour would fail requests instead
-  of securing them.
+- **`bitchordAuth: true`, and the routes check it.** BitChord shows **"Outdated
+  addon"** on every addon whose manifest omits this flag, so leaving it out is
+  not a neutral choice — it is the note the listener sees. It is a promise that
+  every request carries a hardware-signed proof, so the flag and the check ship
+  together; see [Addon auth](#addon-auth). `BITCHORD_AUTH=off` is the one
+  configuration that omits it, and it is the only one that does not verify.
 - **`allowDownloads: 1`** is stated rather than left to the default, because it
   is a decision: every source here serves a URL the app can save, and `0` would
   make a download skip this addon and take the next source.
@@ -123,6 +127,56 @@ both, which is a picker that does nothing. The options are ordered
 `lossless → high → low` for that reason, and `parseTier` accepts exactly those
 three values before falling back to its word lists. The contract check asserts
 every tier reaches its own option.
+
+---
+
+## Addon auth
+
+BitChord 1.9.1+ can require proof that a request comes from the official Android
+app, and marks every addon that does not adopt it as **"Outdated addon"** in
+Settings → Sources. This addon adopts it: the manifest declares
+`"bitchordAuth": true`, and `/search`, `/stream` and `/media` require the two
+headers the app attaches. The manifest itself stays public — the app reads it to
+learn that it has to authenticate.
+
+Verification is local: an Ed25519 JWT from `bitchord-auth.kushagrasingh.in`,
+checked against public keys fetched about once an hour, plus an ECDSA P-256 proof
+over `host · timestamp · SHA-256(token)` made by a key inside the phone's secure
+hardware. The verifier is the reference implementation, vendored unchanged at
+`vendor/bitchord-addon-auth.mjs`.
+
+```bash
+# enforce (default): only the official app gets through
+BITCHORD_HOSTS=addon.example.com node server.js
+
+# log: verify, log failures, still serve everyone — the rollout step
+BITCHORD_AUTH=log BITCHORD_HOSTS=addon.example.com node server.js
+
+# off: no flag, no check, "Outdated addon" shows in the app
+BITCHORD_AUTH=off node server.js
+```
+
+| Refusal | Code | What BitChord does |
+|---|---|---|
+| no credentials | `missing` | attaches them and retries |
+| token expired / invalid | `expired`, `invalid_token` | gets a new token, retries once |
+| proof does not verify | `invalid_proof` | shows an error — the usual cause is a wrong `BITCHORD_HOSTS` |
+| keys never fetched | `unavailable` (503) | treats it as a temporary outage |
+
+**`BITCHORD_HOSTS` is the hostname in the URL the listener pasted** — lowercase,
+no scheme, no port, no path (`addon.example.com`, not
+`https://addon.example.com/`). It is never read from the `Host` header, because
+that header is attacker-controlled. `enforce` refuses to start without it: a
+missing or wrong list makes every request fail `invalid_proof` while `/health`
+still looks healthy, which is worse than a crash.
+
+Two consequences worth knowing before you turn it on:
+
+- **HTTPS is required.** The app only sends its proof over TLS, so an addon
+  reached over plain HTTP on a home LAN must run with `BITCHORD_AUTH=off`.
+- **BitChord desktop and web cannot authenticate.** Once enforced, they cannot
+  use this addon. That is the trade the flag makes, and `off` or `log` is how you
+  decline it.
 
 ---
 
@@ -192,6 +246,9 @@ the day this addon should find it without a deploy. `TIDAL_BASE_URL` and
 | `SOURCES` | `qobuz,monochrome,netease,tidal,archive` | which sources to ask, in priority order |
 | `PROXY` | `0` | `1` to serve audio through this host |
 | `ADDON_TOKEN` | unset | if set, `?token=` is required on every route |
+| `BITCHORD_AUTH` | `enforce` | `off`, `log` or `enforce` — see [Addon auth](#addon-auth) |
+| `BITCHORD_HOSTS` | unset | **required** for `enforce`/`log`: the hostname(s) listeners paste, comma-separated |
+| `BITCHORD_AUTH_URL` | `https://bitchord-auth.kushagrasingh.in` | the issuer the verifier fetches keys from (built into the vendored file; only for a mirror) |
 | `NETEASEV2_API_BASE` | `https://api.qijieya.cn/meting` | the Meting API instance |
 | `NETEASEV2_SERVER` | `netease` | the Meting backend to ask |
 | `NETEASEV2_SEARCH_BASE` | `https://music.163.com/api/search/get` | NetEase's own search, which comes with album and duration; empty string forces search through Meting |

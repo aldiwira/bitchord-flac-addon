@@ -22,13 +22,55 @@
 
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { PORT, HOST, TOKEN } from './src/config.js';
+import { PORT, HOST, TOKEN, AUTH_MODE, AUTH_HOSTS } from './src/config.js';
 import { MANIFEST } from './src/manifest.js';
+import { createAuth, parseHosts } from './src/lib/auth.js';
 import { tokenOk, json, log } from './src/utils/response.js';
 import { handleSearch } from './src/handlers/search.js';
 import { handleStream } from './src/handlers/stream.js';
 import { handleMedia } from './src/handlers/media.js';
 import { handleHealth } from './src/handlers/health.js';
+
+/**
+ * Runs the BitChord check for one route.
+ *
+ * Returns false when the request was refused and the response is already sent.
+ * `log` mode declares the flag, verifies, and then serves anyway — the rollout
+ * step in the docs, where `invalid_proof` is watched before anyone is turned
+ * away.
+ *
+ * @returns {Promise<boolean>}
+ */
+async function allowed(req, res, path) {
+  if (auth.mode === 'off') return true;
+
+  const outcome = await auth.check(req);
+  if (outcome.ok) return true;
+
+  if (auth.mode === 'log') {
+    log('warn', 'bitchord auth would refuse', { path, code: outcome.error ?? 'unknown' });
+    return true;
+  }
+
+  res.writeHead(outcome.status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(outcome.body),
+    'Cache-Control': 'no-store',
+    ...outcome.headers,
+  });
+  res.end(outcome.body);
+  log('info', 'bitchord auth refused', { path, code: outcome.error });
+  return false;
+}
+
+/**
+ * BitChord addon auth, built once at startup.
+ *
+ * `enforce` without a host list is a startup failure rather than a warning: the
+ * proof signs the hostname the listener pasted, so enforcing with an empty list
+ * refuses every request while `/health` still looks fine.
+ */
+const auth = createAuth({ mode: AUTH_MODE, hosts: parseHosts(AUTH_HOSTS) });
 
 const server = createServer(async (req, res) => {
   const requestId = randomUUID().slice(0, 8);
@@ -63,15 +105,20 @@ const server = createServer(async (req, res) => {
     }
 
     if (path === '/search') {
+      if (!(await allowed(req, res, path))) return;
       return await handleSearch(req, res, url);
     }
 
-    if (path.startsWith('/stream/')) {
-      return await handleStream(req, res, url);
-    }
-
-    if (path.startsWith('/media/')) {
-      return await handleMedia(req, res, url);
+    if (path.startsWith('/stream/') || path.startsWith('/media/')) {
+      // `/media` is checked even though the player fetches it without the
+      // BitChord headers: when PROXY=1 the URL is minted per request and is the
+      // only thing standing between the audio and the open internet, so it is
+      // gated here and the `?token=` check above still applies. `PROXY=0` hands
+      // out the upstream URL and never reaches this route.
+      if (!(await allowed(req, res, path))) return;
+      return path.startsWith('/stream/')
+        ? await handleStream(req, res, url)
+        : await handleMedia(req, res, url);
     }
 
     if (path === '/' || path === '/health') {

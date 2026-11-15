@@ -14,6 +14,13 @@ primary_region = "lhr"
   HOST = "0.0.0.0"
   SOURCES = "tidal,archive"
   PROXY = "0"
+  # BitChord addon auth. The manifest declares `bitchordAuth`, which is what
+  # clears the app's "Outdated addon" note, and `enforce` is what makes the
+  # declaration true. BITCHORD_HOSTS must name the hostname listeners paste —
+  # for this app, `<app>.fly.dev` or a custom domain — or every request fails
+  # `invalid_proof`. `enforce` refuses to boot without it, on purpose.
+  BITCHORD_AUTH = "enforce"
+  BITCHORD_HOSTS = "bitchord-flac-addon.fly.dev"
 
 [http_service]
   internal_port = 8787

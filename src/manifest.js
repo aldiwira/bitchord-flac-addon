@@ -14,13 +14,18 @@
  * addon serves lossless honestly, and gating whether the phone may ask at all is
  * the listener's decision, not this manifest's.
  *
- * `bitchordAuth` is absent too. The addon runs as an HTTP service that BitChord
- * calls with the phone's own credentials, and it has no way to verify them
- * without the public keys of the official issuer; declaring the flag would
- * promise a check it cannot make.
+ * `bitchordAuth` is declared in `enforce` mode and absent in `off`. BitChord
+ * shows **"Outdated addon"** on every addon that does not declare it, so an
+ * operator who wants that note gone has to declare it — and declaring it is a
+ * promise that `/search` and `/stream` check the proof the app attaches. The two
+ * are one feature, which is why `src/lib/auth.js` gates the routes by the same
+ * switch that decides this field.
+ *
+ * `log` mode declares the flag and does not refuse anyone: the rollout step the
+ * docs describe, where credentials are verified and failures are only logged.
  */
 
-import { VERSION } from './config.js';
+import { VERSION, AUTH_MODE } from './config.js';
 import { ACTIVE } from './registry.js';
 
 /**
@@ -90,6 +95,9 @@ export const MANIFEST = Object.freeze({
   version: VERSION,
   resources: ['search', 'stream'],
   allowDownloads: ALLOW_DOWNLOADS,
+  // `off` is the only mode that leaves the flag out, because it is the only one
+  // that does not check. Anything else declares it, `log` included.
+  ...(AUTH_MODE === 'off' ? {} : { bitchordAuth: true }),
   settings: [
     {
       key: 'quality',
