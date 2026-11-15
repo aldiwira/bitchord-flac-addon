@@ -131,7 +131,7 @@ every tier reaches its own option.
 | Source | Credentials | What it is | Verified |
 |---|---|---|---|
 | **Tidal** (via Monochrome's public index) | **none** | The commercial catalogue. `/search/tracks` for metadata, `/track/{id}` for the FLAC itself. | `fLaC` bytes, 206 range responses, `HEAD` OK |
-| **Qobuz** (via a public relay, or your own `qobuz-rest-api`) | **none** for the relay | The only source that can serve **Hi-Res**: 24-bit, up to 192 kHz. Asked for `HI_RES` whenever lossless is wanted; what arrives is probed. | relay returned `503 Service Suspended` at the time of writing — see below |
+| **Qobuz** (the label; upstream is the Lossless Bridge) | **none** for the public instance | The only source that can serve **Hi-Res**: 24-bit, up to 192 kHz. Asked for `HI_RES` whenever lossless is wanted; what arrives is probed. Ids carry the backend (`td_`, `qq_`, `ne_`), so not every row is a Qobuz track — see below. | `fLaC` bytes, probed to 24-bit/192 kHz on a `qq_` row; `/health` reports each backend |
 | **Monochrome** (public instances) | **none** | The thorough half of the Tidal index: also walks the public instance registry, and is the only source that knows about DASH manifests and 30-second previews. | `fLaC` bytes via `tracks.monochrome.st` |
 | **Deezer** | **none** | **Catalogue only.** Public API, broadest catalogue, carries ISRCs. Holds no audio, so every `deezer:` row fails over to a source that does. | rows returned; no stream by design |
 | **Internet Archive** | **none** | Freely-licensed recordings: live tapes, bootlegs, public-domain transfers, classical and jazz sets. | `fLaC` bytes, 985,733 items indexed |
@@ -142,8 +142,7 @@ Tidal and Monochrome are CD quality — 44.1 kHz / 16-bit, which is bit-exact
 lossless. The Tidal index serves the same file whichever tier is asked for, so
 **24-bit/96 kHz Hi-Res is not available from it**, and this addon does not claim
 otherwise: the `quality` string is generated from the header that was actually
-read. Qobuz is the only Hi-Res path, and it depends on a relay that outlives its
-own session.
+read. Qobuz is the only Hi-Res path, and it depends on a public bridge instance.
 
 Two sources that were tested and **rejected**, recorded here so nobody re-runs the
 same experiment:
@@ -152,12 +151,28 @@ same experiment:
 |---|---|
 | Kuwo | `mobi.kuwo.cn` answered a FLAC request with `br=1` and served an MP3, and returned `code 407` ("not available in your region") for other tracks. |
 
-**The public Qobuz relay is gone.** `soundfean-musics.onrender.com` answers every
-request with `503 Service Suspended`, permanently rather than as a cold start. The
-source is kept because the code path is sound and the fix is configuration, not
-code: point `QOBUZ_REST_API` at your own `qobuz-rest-api` instance and the Hi-Res
-path works again. `/health` reports the relay as `ok: false` rather than hiding it,
-and failover walks past it, so its failure costs nothing but the Hi-Res rows.
+**The Qobuz source talks to the Lossless Bridge, not to a Qobuz relay.** The
+upstream at `QOBUZ_UPSTREAM_BASE_URL` now speaks BitChord's own protocol
+(`/search`, `/stream/{id}`, `/health`) and fans out over several catalogues. It
+reports its own `qobuz` backend as `disabled`, so a row from here is far more
+likely to be Tidal-via-Monochrome, QQ Music or NetEase than Qobuz:
+
+```
+qobuz row (td_…) → bridge /stream?quality=HI_RES → probed bytes
+  td_ … Tidal via Monochrome   44.1 kHz / 16-bit
+  qq_ … QQ Music               up to 192 kHz / 24-bit
+  ne_ … NetEase                44.1 kHz / 16-bit
+```
+
+The id prefixes are not a whitelist in the code. An earlier version accepted only
+bare numeric ids and silently returned **zero rows** once the upstream changed;
+`bridgeId()` now accepts any URL-safe id the bridge issues, so a new backend
+appears without a code change.
+
+`/health` reports each backend's state (`bridge 2.0.0 · 8 backend(s) ·
+qqmusic:degraded, qobuz:disabled, …`) rather than a single ok/false, and failover
+walks past this source when it cannot answer at all, so its failure costs nothing
+but its rows. `QOBUZ_REST_API`, when set, is asked instead of the public instance.
 
 Monochrome's *other* public instances — `api.monochrome.tf`, the `qqdl.site`
 hosts, `tidal.kinoplus.online`, `triton.squid.wtf` — are all dead as of November
@@ -183,8 +198,8 @@ the day this addon should find it without a deploy. `TIDAL_BASE_URL` and
 | `NETEASEV2_DETAIL_BASE` | `https://music.163.com/api/song/detail` | NetEase's own detail endpoint, asked for the album Meting's search omits |
 | `TIDAL_BASE_URL` | `https://tracks.monochrome.st` | the Tidal-backed index |
 | `MONOCHROME_BASE_URL` | `https://tracks.monochrome.st` | the first Monochrome instance asked |
-| `QOBUZ_UPSTREAM_BASE_URL` | the relay in `qobuz.js` | the public Qobuz relay |
-| `QOBUZ_REST_API` | unset | your own qobuz-rest-api; preferred over the relay when set |
+| `QOBUZ_UPSTREAM_BASE_URL` | the bridge in `qobuz.js` | the public Lossless Bridge instance |
+| `QOBUZ_REST_API` | unset | your own bridge instance; preferred over the public one when set |
 | `DEEZER_API_BASE` | `https://api.deezer.com` | Deezer's catalogue API |
 
 Run Tidal alone — the fastest possible search, since the Archive's fan-out is
@@ -399,7 +414,7 @@ src/lib/sources/tidal.js     Tidal via Monochrome's public index
 src/lib/sources/archive.js   Internet Archive
 src/lib/sources/netease.js   NetEase Cloud Music — NetEase search, Meting for audio
 src/lib/sources/monochrome.js public instances, DASH and preview handling
-src/lib/sources/qobuz.js     Hi-Res via a relay or your own qobuz-rest-api
+src/lib/sources/qobuz.js     Hi-Res via the Lossless Bridge, or your own instance
 src/lib/sources/deezer.js    catalogue only — rows that fail over to the others
 src/lib/probe.js             one STREAMINFO read, shared by every source
 src/scripts/contract-check.js live check against the rules BitChord enforces

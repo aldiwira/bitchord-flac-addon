@@ -886,3 +886,58 @@ describe('the manifest', () => {
     assert.ok(setting.options.some((o) => o.value === setting.default));
   });
 });
+
+import { bridgeId, seconds as qobuzSeconds, mapTrack } from '../src/lib/sources/qobuz.js';
+
+describe('the Lossless Bridge source', () => {
+  test('accepts every id family the bridge issues', () => {
+    // The regression: this used to accept only `^\d+$`, which dropped every row
+    // the bridge returned once it started prefixing ids by backend.
+    for (const id of ['td_155102871061270528', 'qq_004fDVvw1DxZeE', 'ne_17455854', '154049681742106624']) {
+      assert.equal(bridgeId(id), id);
+    }
+  });
+
+  test('refuses ids that cannot survive a URL path segment', () => {
+    for (const bad of ['', null, undefined, 'a/b', 'a b', 'a?b', 'x'.repeat(201)]) {
+      assert.equal(bridgeId(bad), null);
+    }
+  });
+
+  test('maps a bridge row, keeping the id verbatim for the later resolve', () => {
+    const row = mapTrack({
+      id: 'td_155102871061270528',
+      title: 'One More Time',
+      artist: 'Daft Punk',
+      album: '',
+      duration: 320.4,
+      artworkURL: 'https://tracks.monochrome.st/proxy/mi/x.jpg',
+      audioQuality: 'LOSSLESS',
+    });
+    assert.equal(row.id, 'qobuz:td_155102871061270528');
+    assert.equal(row._nativeId, 'td_155102871061270528', 'the bridge id, not the row id');
+    assert.equal(row.duration, 320);
+    assert.equal(row.audioQuality, 'LOSSLESS');
+    assert.equal(row.album, '');
+  });
+
+  test('a row is labelled Hi-Res only when the bridge said so', () => {
+    const hi = mapTrack({ id: 'qq_1', title: 'x', audioQuality: 'Hi-Res Lossless · 24-bit / 192 kHz' });
+    assert.equal(hi.audioQuality, 'HI_RES_LOSSLESS');
+    const cd = mapTrack({ id: 'ne_2', title: 'y', audioQuality: 'Lossless · 16-bit / 44.1 kHz' });
+    assert.equal(cd.audioQuality, 'LOSSLESS', 'asked-for HI_RES is not a claim');
+  });
+
+  test('drops a row with no id or no title', () => {
+    assert.equal(mapTrack({ title: 'x' }), null);
+    assert.equal(mapTrack({ id: 'td_1' }), null);
+    assert.equal(mapTrack({ id: 'td_1', title: '   ' }), null);
+  });
+
+  test('duration is seconds, not milliseconds, when it is plausible', () => {
+    assert.equal(qobuzSeconds(320.4), 320);
+    assert.equal(qobuzSeconds(320_400), 320, 'a relay sending ms is still read as seconds');
+    assert.equal(qobuzSeconds(0), undefined);
+    assert.equal(qobuzSeconds('nope'), undefined);
+  });
+});

@@ -1,30 +1,47 @@
 /**
- * Qobuz, through a public relay.
+ * Qobuz, through the Lossless Bridge.
  *
  * The only source here that can serve **Hi-Res**: 24-bit, up to 192 kHz, when
- * the upstream has it. That is worth the fragility — `soundfean-musics` is a
- * Render-hosted proxy, so its first request after idle can take longer than any
- * sensible timeout, and its answers are only as current as its own session.
+ * the upstream has it.
  *
- * Two tiers of upstream, and the fallback is the point:
+ * ## The upstream is not a Qobuz relay any more
  *
- *   default     `QOBUZ_UPSTREAM_BASE_URL` — a relay that answers `/search` and
- *               `/stream/{id}` with a signed URL it obtained itself
- *   self-hosted `QOBUZ_REST_API` — your own `qobuz-rest-api`, which the relay
- *               is presumably wrapping. Asked directly and preferred when set,
- *               because it is the only path where the answer is your own account
- *               rather than someone else's.
+ * It speaks this addon's own protocol — `/search?q=` returning `{tracks}` in
+ * BitChord's row shape, `/stream/{id}?quality=` returning `{url}`, and `/health`
+ * — and it aggregates several catalogues behind those two routes. Its ids carry
+ * the catalogue they came from:
  *
- * Neither needs credentials here. Which is also the honest caveat: a relay's
- * idea of "HI_RES" is only as good as its session, so every answer is probed
- * unless the relay already stated the codec and the headers — and when it
- * states nothing, the probe decides rather than the request that was made.
+ *   `td_…`  Tidal, via Monochrome
+ *   `qq_…`  QQ Music, the usual Hi-Res 24-bit/192 kHz source
+ *   `ne_…`  NetEase
+ *
+ * Two consequences, both of which broke this file when the upstream changed:
+ *
+ * 1. **Ids are not numeric.** The old contract used bare Qobuz track ids and
+ *    `mapTrack` rejected anything else, so every row was dropped and `search`
+ *    returned nothing at all. The id is now whatever the upstream issued,
+ *    passed back verbatim.
+ * 2. **Rows already carry a `source`.** This source is named `qobuz` because
+ *    that is the prefix already in clients' queues, not because every row is
+ *    from Qobuz. The upstream's `/health` currently reports its own `qobuz`
+ *    backend as disabled.
+ *
+ * ## Two upstreams, and the fallback is the point
+ *
+ *   default     `QOBUZ_UPSTREAM_BASE_URL` — a public bridge instance
+ *   self-hosted `QOBUZ_REST_API` — your own, asked directly and preferred when
+ *               set, because it is the only path under your own control
+ *
+ * Neither needs credentials here. Which is also the honest caveat: the bridge's
+ * idea of "HI_RES" is only as good as the backend it reached, so every answer is
+ * probed rather than trusted.
  */
 
 import { describeMedia } from '../probe.js';
 import { httpJson, TtlCache, NotFound, UpstreamError } from '../http.js';
 
-const BASE = (process.env.QOBUZ_UPSTREAM_BASE_URL || 'https://losslessbridge.de.deplexo.com/u/tpg000.vxrtcq1VeQcF0m1koi0Ncw.ThwpJfA6x3aCvX1oGq5iV_')
+const BASE = (process.env.QOBUZ_UPSTREAM_BASE_URL ||
+  'https://losslessbridge.de.deplexo.com/u/tpg000.vxrtcq1VeQcF0m1koi0Ncw.ThwpJfA6x3aCvX1oGq5iV_')
   .replace(/\/+$/, '');
 const SELF_HOSTED = String(process.env.QOBUZ_REST_API || '').replace(/\/+$/, '');
 
@@ -32,7 +49,7 @@ const searchCache = new TtlCache(2_000);
 const SEARCH_TTL_MS = 5 * 60 * 1000;
 
 /**
- * BitChord's tier vocabulary mapped to Qobuz's own.
+ * BitChord's tier vocabulary mapped to the bridge's own.
  *
  * Ask for Hi-Res whenever lossless is wanted, because the whole reason this
  * source exists is the 24-bit catalogue and a request for CD quality cannot be
@@ -46,13 +63,27 @@ const UPSTREAM_QUALITY = {
 
 const MAX_ROWS = 25;
 
+/**
+ * The id the bridge issued, or null when it did not issue one.
+ *
+ * Deliberately not a pattern match on the catalogue prefixes. The bridge gains
+ * backends over time — `gd_`, `ja_` and anything after them — and a whitelist
+ * here is how this file silently returned zero rows for a whole upstream. The
+ * only things an id must be are non-empty, and safe in a URL path segment.
+ */
+export function bridgeId(value) {
+  const id = String(value ?? '').trim();
+  if (!id || id.length > 200) return null;
+  return /^[A-Za-z0-9_.:-]+$/.test(id) ? id : null;
+}
+
 function artworkUrl(value) {
   const url = String(value ?? '').trim();
   return /^https?:\/\//i.test(url) ? url : undefined;
 }
 
-/** Qobuz relays state either a duration in seconds or, confusingly, in ms. */
-function seconds(value) {
+/** The bridge states a duration in seconds; older relays sometimes sent ms. */
+export function seconds(value) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return undefined;
   return Math.round(n > 3_600 ? n / 1000 : n);
@@ -61,19 +92,18 @@ function seconds(value) {
 /**
  * A search row, or null when the item cannot be turned into one.
  *
- * `hiRes` is read from the catalogue's own `audioQuality` string rather than
- * assumed from the request: a relay asked for HI_RES that only has CD quality
- * answers with CD quality, and announcing Hi-Res on that row would be a claim
- * this addon cannot keep.
+ * `hiRes` is read from the bridge's own `audioQuality` string rather than
+ * assumed from the request: a bridge asked for HI_RES that only reached a CD
+ * backend answers with CD quality, and announcing Hi-Res on that row would be a
+ * claim this addon cannot keep.
  */
-function mapTrack(item) {
-  const id = String(item?.id ?? '').trim();
+export function mapTrack(item) {
+  const id = bridgeId(item?.id);
   const title = String(item?.title ?? '').trim();
-  // Ids are numeric Qobuz track ids. Anything else is a row this addon could not
-  // resolve later, so it is not offered now.
-  if (!/^\d+$/.test(id) || !title) return null;
+  if (!id || !title) return null;
 
-  const hiRes = /24[\s-]*bit|hi-?res/i.test(String(item?.audioQuality ?? item?.quality ?? ''));
+  const stated = String(item?.audioQuality ?? item?.quality ?? '');
+  const hiRes = /24[\s-]*bit|hi-?res/i.test(stated);
 
   return {
     id: `qobuz:${id}`,
@@ -92,10 +122,10 @@ function mapTrack(item) {
 /**
  * The one place this source decides where to ask.
  *
- * A self-hosted API is preferred when configured: it is the answer from your own
- * account, and it does not disappear when someone else's relay does.
+ * A self-hosted bridge is preferred when configured: it is the answer under your
+ * own control, and it does not disappear when someone else's instance does.
  */
-async function relayJson(path, signal) {
+async function bridgeJson(path, signal) {
   if (SELF_HOSTED) {
     return httpJson(`${SELF_HOSTED}${path}`, { timeoutMs: 12_000, retries: 1, signal });
   }
@@ -104,7 +134,7 @@ async function relayJson(path, signal) {
 
 export const qobuz = {
   id: 'qobuz',
-  label: 'Qobuz',
+  label: 'Qobuz (Lossless Bridge)',
   lossless: true,
   hiRes: true,
   baseUrl: SELF_HOSTED || BASE,
@@ -118,12 +148,12 @@ export const qobuz = {
     return searchCache.wrap(`qobuz:${text.toLowerCase()}:${capped}`, SEARCH_TTL_MS, async () => {
       let payload;
       try {
-        payload = await relayJson(
+        payload = await bridgeJson(
           `/search?q=${encodeURIComponent(text)}&quality=LOSSLESS&limit=${capped}`,
           signal,
         );
       } catch (error) {
-        // A relay that is down costs this source's rows, never the search: the
+        // A bridge that is down costs this source's rows, never the search: the
         // handler turns a rejected source into a partial result.
         if (error instanceof NotFound) return [];
         throw error;
@@ -153,50 +183,42 @@ export const qobuz = {
   /**
    * Resolves one track to a signed media URL plus what it actually carries.
    *
-   * The relay's own fields are trusted only where they are checkable: a URL is
-   * probed, and a relay that states a sample rate it cannot back up is corrected
-   * by the bytes. Where the probe fails but the relay named a codec, the answer
-   * is that codec unprobed rather than a refusal — the track plays, and
-   * `probed: false` is visible to `/health` and the contract check.
+   * The bridge's own fields are trusted only where they are checkable: a URL is
+   * probed, and a bridge that states a sample rate it cannot back up is
+   * corrected by the bytes. Where the probe fails but the bridge named a codec,
+   * the answer is that codec unprobed rather than a refusal — the track plays,
+   * and `probed: false` is visible to `/health` and the contract check.
    */
   async resolve(nativeId, tier, signal) {
-    const id = String(nativeId ?? '').trim();
-    if (!/^\d+$/.test(id)) throw new NotFound('no Qobuz track id');
+    const id = bridgeId(nativeId);
+    if (!id) throw new NotFound('no usable bridge track id');
 
     const upstreamQuality = UPSTREAM_QUALITY[tier] ?? 'HI_RES';
 
-    let payload;
-    if (SELF_HOSTED) {
-      payload = await httpJson(
-        `${SELF_HOSTED}/track/getStreamUrl?id=${encodeURIComponent(id)}` +
-          `&quality=${encodeURIComponent(tier || 'LOSSLESS')}`,
-        { timeoutMs: 12_000, retries: 1, signal },
-      ).catch((error) => {
-        if (error instanceof NotFound) return null;
-        throw error;
-      });
-    } else {
-      payload = await relayJson(
-        `/stream/${encodeURIComponent(id)}?quality=${upstreamQuality}`,
-        signal,
-      ).catch((error) => {
-        if (error instanceof NotFound) return null;
-        throw error;
-      });
-    }
+    const payload = await bridgeJson(
+      `/stream/${encodeURIComponent(id)}?quality=${encodeURIComponent(upstreamQuality)}`,
+      signal,
+    ).catch((error) => {
+      if (error instanceof NotFound) return null;
+      throw error;
+    });
 
     const url = String(payload?.url ?? payload?.data?.url ?? '').trim();
-    if (!url) throw new NotFound('Qobuz relay has no stream for this track');
+    if (!url) throw new NotFound('the lossless bridge has no stream for this track');
 
-    // A relay that hands back something that is not https is handing back a
+    // A bridge that hands back something that is not https is handing back a
     // problem: BitChord will refuse to open it, and this addon will not offer it.
     if (!/^https:\/\//i.test(url)) {
-      throw new UpstreamError('Qobuz relay returned a non-https media URL', { retryable: false });
+      throw new UpstreamError('the lossless bridge returned a non-https media URL', {
+        retryable: false,
+      });
     }
 
-    // `encrypted: true` is the relay admitting DRM or a format this addon cannot
+    // `encrypted: true` is the bridge admitting DRM or a format this addon cannot
     // serve. BitChord rejects those outright, so this is a miss, not a stream.
-    if (payload?.encrypted === true) throw new NotFound('Qobuz relay marked this stream encrypted');
+    if (payload?.encrypted === true) {
+      throw new NotFound('the lossless bridge marked this stream encrypted');
+    }
 
     const declaredCodec = String(payload?.codec ?? '').toLowerCase() || undefined;
 
@@ -206,23 +228,35 @@ export const qobuz = {
       signal,
     });
 
-    if (!described) throw new NotFound('Qobuz stream was neither FLAC nor a named codec');
-    if (described.encrypted === true) throw new NotFound('Qobuz stream is encrypted');
+    if (!described) throw new NotFound('bridge stream was neither FLAC nor a named codec');
+    if (described.encrypted === true) throw new NotFound('bridge stream is encrypted');
 
     return described;
   },
 
-  /** For the health route. */
+  /**
+   * For the health route.
+   *
+   * The bridge's `/health` is what makes this worth reporting at all: it names
+   * the backends behind `/search`, so "the bridge answered" and "the bridge can
+   * serve Hi-Res" are distinguishable. A degraded backend is reported rather
+   * than treated as failure — the bridge still answers, it just reaches fewer
+   * catalogues.
+   */
   async health() {
-    const endpoint = SELF_HOSTED ? `${SELF_HOSTED}/track/getStreamUrl?id=0` : `${BASE}/search?q=music`;
+    const root = SELF_HOSTED || BASE;
     try {
-      const payload = await httpJson(endpoint, { timeoutMs: 10_000, retries: 0 });
-      const n = Array.isArray(payload?.tracks) ? payload.tracks.length : 0;
+      const payload = await httpJson(`${root}/health`, { timeoutMs: 10_000, retries: 0 });
+      const states = payload?.sources ?? {};
+      const degraded = Object.entries(states)
+        .filter(([, value]) => value?.state && value.state !== 'ok')
+        .map(([name, value]) => `${name}:${value.state}`);
+
       return {
-        ok: true,
-        detail: SELF_HOSTED
-          ? 'self-hosted qobuz-rest-api answered'
-          : `relay answered, ${n} result(s) for a probe query`,
+        ok: payload?.ok !== false,
+        detail: `bridge ${payload?.version ?? '?'} · ` +
+          `${Object.keys(states).length} backend(s)` +
+          (degraded.length ? ` · ${degraded.join(', ')}` : ''),
       };
     } catch (error) {
       return { ok: false, detail: error.message };
