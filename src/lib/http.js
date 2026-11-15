@@ -250,6 +250,18 @@ export async function settleAll(tasks, limit = 6) {
 export function parseTier(raw) {
   const value = String(raw ?? '').toLowerCase();
   if (!value) return 'LOSSLESS';
+
+  // Matched against the values this addon's own manifest declares first, because
+  // those are the strings that will actually arrive: BitChord sends the picked
+  // option verbatim when it recognises one, and the declared values are
+  // `lossless`/`high`/`low` — none of which needs the word lists below.
+  if (value === 'lossless' || value === 'high' || value === 'low') {
+    return value.toUpperCase();
+  }
+
+  // Then the spellings a host may send when the manifest could not be read, or
+  // when the tier is the app's native one. Lossless wins any ambiguity: it is the
+  // only tier this addon can serve without qualification.
   if (/lossless|flac|hi-?res|hires|max|best|24bit/.test(value)) return 'LOSSLESS';
   if (/low|96|128|min|small/.test(value)) return 'LOW';
   if (/high|320|normal|standard|medium/.test(value)) return 'HIGH';

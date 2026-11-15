@@ -76,6 +76,54 @@ Two consequences, both deliberate:
 - Rename it and the change appears the next time you open the Sources screen.
   No need to remove and re-add the source.
 
+### What the manifest says, and what it deliberately does not
+
+`GET /manifest.json` is read into `AddonManifest`, which has five fields with a
+reader behind them: `id`, `name`, `version`, `resources`, `settings` — plus two
+switches, `allowDownloads` and `checkValidLossless`. Everything else is discarded
+on parse (`ignoreUnknownKeys = true`), so this addon sends nothing else.
+
+```json
+{
+  "id": "dev.oreomuncher45.bitchord.flac",
+  "name": "FLAC Source · Tidal + Monochrome + Internet Archive",
+  "version": "1.0.0",
+  "resources": ["search", "stream"],
+  "allowDownloads": 1,
+  "settings": [
+    { "key": "quality", "type": "select", "default": "lossless",
+      "options": [
+        { "label": "Lossless (FLAC)",       "value": "lossless" },
+        { "label": "High (up to 320 kbps)", "value": "high" },
+        { "label": "Low (data saver)",      "value": "low" }
+      ] }
+  ]
+}
+```
+
+Three decisions in that object, all of them about not overstating:
+
+- **`checkValidLossless` is absent.** It would make BitChord hide this addon on
+  a Bluetooth headset, and whether the addon is worth asking is the listener's
+  call. The addon serves lossless honestly; it does not need to police the
+  output. `AddonPolicyTest` reads the absent key as *no output check*.
+- **`bitchordAuth` is absent.** It is a promise that every request carries a
+  hardware-signed proof. This service cannot verify one without the official
+  issuer's public keys, and a flag it cannot honour would fail requests instead
+  of securing them.
+- **`allowDownloads: 1`** is stated rather than left to the default, because it
+  is a decision: every source here serves a URL the app can save, and `0` would
+  make a download skip this addon and take the next source.
+
+The `quality` options are load-bearing, not decoration. `AddonClient.matchTier`
+resolves a tier by exact value, then by word (`high`/`320`/`normal`/`standard`
+for HIGH, `low`/`96`/`128`/`min` for LOW), then **falls back to the first
+option** — so a list that omits `high` or `low` silently serves lossless for
+both, which is a picker that does nothing. The options are ordered
+`lossless → high → low` for that reason, and `parseTier` accepts exactly those
+three values before falling back to its word lists. The contract check asserts
+every tier reaches its own option.
+
 ---
 
 ## What it serves, and where from

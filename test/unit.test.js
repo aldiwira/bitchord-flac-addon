@@ -846,3 +846,43 @@ describe('a throttle is not a miss', () => {
   });
 });
 
+
+import { MANIFEST } from '../src/manifest.js';
+
+describe('the manifest', () => {
+  test('declares only fields AddonManifest has a reader for', () => {
+    // ignoreUnknownKeys is on, so anything else is silently discarded — the
+    // failure mode is a claim made to nobody, not a parse error.
+    const known = ['id', 'name', 'version', 'resources', 'allowDownloads',
+      'checkValidLossless', 'settings'];
+    for (const key of Object.keys(MANIFEST)) {
+      assert.ok(known.includes(key), `"${key}" has no reader in AddonManifest`);
+    }
+  });
+
+  test('does not gate itself on a lossless output', () => {
+    // Absent means no output check. Declaring it hides the addon on a Bluetooth
+    // headset, which is the listener's decision to make, not the manifest's.
+    assert.equal(MANIFEST.checkValidLossless, undefined);
+  });
+
+  test('states that downloads are allowed', () => {
+    assert.equal(MANIFEST.allowDownloads, 1);
+  });
+
+  test('the quality picker has a distinct option for every tier', () => {
+    const options = MANIFEST.settings.find((s) => s.key === 'quality').options;
+    const values = options.map((o) => o.value);
+    assert.deepEqual(values, ['lossless', 'high', 'low']);
+    // matchTier falls back to the first option, so a missing tier is served as
+    // lossless. The check that matters is that parseTier agrees with each.
+    for (const value of values) {
+      assert.equal(parseTier(value), value.toUpperCase());
+    }
+  });
+
+  test('the declared default is one of the options', () => {
+    const setting = MANIFEST.settings.find((s) => s.key === 'quality');
+    assert.ok(setting.options.some((o) => o.value === setting.default));
+  });
+});

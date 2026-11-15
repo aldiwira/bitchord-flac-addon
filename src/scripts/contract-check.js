@@ -97,6 +97,88 @@ async function main() {
   check('declares search', (m.resources ?? []).some((r) => String(r).toLowerCase() === 'search'),
     `resources=[${(m.resources ?? []).join(', ')}]`);
 
+  // ── The manifest switches, as AddonManifest actually reads them ─────────
+  // Reproduced rather than described:
+  //   downloadsAllowed        = allowDownloads.asFlag()      ?: true
+  //   requiresLosslessOutput  = checkValidLossless.asFlag()  ?: false
+  //   qualityOptions          = settings[key=="quality"].options, if >1 distinct
+  //   matchTier(sent, options)= exact (ci) → word → first option
+  // `asFlag` accepts a number, a boolean or a string spelling, which is why an
+  // addon can send 1 and a test can send "1" and both mean yes.
+  section('The manifest switches BitChord reads');
+
+  const flag = (value) => {
+    if (value === undefined || value === null) return null;
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'number') return value !== 0;
+    const text = String(value).toLowerCase();
+    if (['false', '0', 'off', 'no', 'none', 'never'].includes(text)) return false;
+    return text.length > 0;
+  };
+
+  check('does not gate itself on a lossless output',
+    flag(m.checkValidLossless) !== true,
+    'a declared checkValidLossless hides this addon on a Bluetooth headset');
+  check('states whether downloads are allowed',
+    flag(m.allowDownloads) !== null,
+    'absent means allowed; stated means the intent is on the record');
+  check('allowDownloads is a flag, not an arbitrary string',
+    m.allowDownloads === undefined || typeof m.allowDownloads !== 'string' ||
+      ['0', '1', 'true', 'false'].includes(m.allowDownloads.toLowerCase()),
+    `allowDownloads=${JSON.stringify(m.allowDownloads)}`);
+
+  // The quality picker, and the one thing that makes it work: every tier the app
+  // can ask for has to land on a declared value. `matchTier` falls back to the
+  // first option, so an option list that does not name HIGH or LOW silently
+  // serves lossless for both — which reads as a broken picker to the user.
+  const quality = (m.settings ?? []).find((setting) => setting.key === 'quality');
+  const optionValues = (quality?.options ?? [])
+    .map((option) => (typeof option?.value === 'string' ? option.value : null))
+    .filter(Boolean);
+
+  check('declares a quality setting', Boolean(quality),
+    quality ? `default=${JSON.stringify(quality.default)}` : 'no picker is drawn without one');
+  check('a quality picker needs two or more options',
+    optionValues.length >= 2,
+    `${optionValues.length} option(s): a single option is not a choice`);
+
+  if (quality) {
+    check('every option is a string value',
+      (quality.options ?? []).every((option) => typeof option?.value === 'string' && option.value),
+      'a non-string value is dropped before the picker is drawn');
+    check('the declared default is one of the options',
+      optionValues.includes(String(quality.default)),
+      `default=${JSON.stringify(quality.default)} options=[${optionValues.join(', ')}]`);
+
+    // What the host will send for each tier it can ask for. Exact match first,
+    // then the word lists the client uses, then the first option.
+    const HIGH_WORDS = ['high', '320', 'normal', 'standard'];
+    const LOW_WORDS = ['low', '96', '128', 'min'];
+    const resolveTier = (tier) => {
+      const exact = optionValues.find((v) => v.toLowerCase() === tier.toLowerCase());
+      if (exact) return exact;
+      const words = tier.toLowerCase() === 'low' ? LOW_WORDS : HIGH_WORDS;
+      return optionValues.find((v) => words.some((w) => v.toLowerCase().includes(w)))
+        ?? optionValues[0];
+    };
+
+    for (const tier of ['LOSSLESS', 'HIGH', 'LOW']) {
+      const sent = resolveTier(tier);
+      const own = sent.toLowerCase() !== optionValues[0].toLowerCase() || tier === 'LOSSLESS';
+      check(`tier ${tier} reaches its own option, not the first one`,
+        own,
+        own
+          ? `${tier} → ${JSON.stringify(sent)}`
+          : `${tier} → ${JSON.stringify(sent)}, the same as every other tier`);
+    }
+    console.log(`        quality picker: ${optionValues.join(' → ')}`);
+  }
+
+  // A field BitChord has no reader for is a claim made to nobody.
+  check('does not send a description the schema has no field for',
+    m.description === undefined,
+    'AddonManifest has no `description`; it is discarded on parse');
+
   // ── The name the user will actually see ─────────────────────────────────
   // Reproduces BitChord's own resolution rather than trusting that it works:
   //   AddonManifest.displayName = name.ifBlank { id }

@@ -1,3 +1,25 @@
+/**
+ * What this addon tells BitChord about itself.
+ *
+ * Only fields the app actually reads:
+ *
+ *   id, name, version, resources   `AddonManifest`, and `name` is the display name
+ *   allowDownloads                 whether a download may take a stream from here
+ *   settings                       read for its *defaults* and, for `quality`,
+ *                                  for the picker it draws
+ *
+ * Everything else a manifest could carry is ignored. `description` in particular
+ * is not in the schema — an addon that sends one is sending a field the app
+ * discards — so it is not sent. `checkValidLossless` is absent on purpose: this
+ * addon serves lossless honestly, and gating whether the phone may ask at all is
+ * the listener's decision, not this manifest's.
+ *
+ * `bitchordAuth` is absent too. The addon runs as an HTTP service that BitChord
+ * calls with the phone's own credentials, and it has no way to verify them
+ * without the public keys of the official issuer; declaring the flag would
+ * promise a check it cannot make.
+ */
+
 import { VERSION } from './config.js';
 import { ACTIVE } from './registry.js';
 
@@ -24,21 +46,56 @@ function displayName() {
   return 'FLAC Source';
 }
 
-export const MANIFEST = {
+/**
+ * The `quality` picker.
+ *
+ * Two things about this list are load-bearing rather than cosmetic.
+ *
+ * **The values are what arrives as `?quality=`**, and `matchTier` reads them by
+ * meaning, not by position: a tier the app itself is asking for (`LOSSLESS`,
+ * `HIGH`, `LOW`) is matched case-insensitively first, then by word (`high`,
+ * `320`, `normal`, `standard` for HIGH; `low`, `96`, `128`, `min` for LOW), and
+ * failing both it takes the first option — which is therefore the recommended
+ * one. So `lossless` first, then `high`, then `low`, and every tier the app can
+ * ask for lands on one of them.
+ *
+ * **The labels are drawn by BitChord**, and it draws this picker in its own
+ * words when it can recognise the values. These labels are what is shown when it
+ * cannot, so they describe the audio rather than the protocol: what the listener
+ * gets, not what the addon calls it.
+ *
+ * Only two or more usable values make a picker at all; a single option is not a
+ * choice and would leave the user with a form that does nothing.
+ */
+const QUALITY_OPTIONS = [
+  { label: 'Lossless (FLAC)', value: 'lossless' },
+  { label: 'High (up to 320 kbps)', value: 'high' },
+  { label: 'Low (data saver)', value: 'low' },
+];
+
+/**
+ * Downloads are allowed.
+ *
+ * Every audio source here serves a URL the app can save, and the alternative — `0`
+ * — makes a download skip this addon entirely and take the next source, which for
+ * a lossless download is the worst outcome available. What is served is what the
+ * catalogue served; there is nothing licence-wise that playback has and a
+ * download does not.
+ */
+const ALLOW_DOWNLOADS = 1;
+
+export const MANIFEST = Object.freeze({
   id: 'dev.oreomuncher45.bitchord.flac',
   name: displayName(),
   version: VERSION,
   resources: ['search', 'stream'],
+  allowDownloads: ALLOW_DOWNLOADS,
   settings: [
     {
       key: 'quality',
       type: 'select',
       default: 'lossless',
-      options: [
-        { label: 'Lossless (FLAC)', value: 'lossless' },
-        { label: 'High', value: 'high' },
-        { label: 'Low', value: 'low' },
-      ],
+      options: QUALITY_OPTIONS,
     },
   ],
-};
+});
