@@ -143,6 +143,7 @@ const server = createServer(async (req, res) => {
       path: url.pathname,
       status: res.statusCode,
       ms: Date.now() - started,
+      ip: req.socket.remoteAddress
     });
   }
 });
@@ -151,14 +152,15 @@ server.headersTimeout = 20_000;
 server.requestTimeout = 0;
 
 server.listen(PORT, HOST, () => {
+  const host = `http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`;
   log('info', 'listening', {
-    url: `http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`,
+    url: host,
     proxyAudio: process.env.PROXY === '1',
     tokenRequired: Boolean(TOKEN),
   });
   console.log('');
-  console.log(`  Add to BitChord:  http://<this-host>:${PORT}/manifest.json`);
-  console.log(`  Health check:     http://<this-host>:${PORT}/health`);
+  console.log(`  Add to BitChord:  ${host}/manifest.json`);
+  console.log(`  Health check:     ${host}/health`);
   console.log('');
 });
 

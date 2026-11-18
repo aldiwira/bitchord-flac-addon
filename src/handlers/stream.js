@@ -81,6 +81,7 @@ export async function handleStream(req, res, url) {
     sampleRate: answer.sampleRate,
     bitDepth: answer.bitDepth,
     proxied: PROXY_AUDIO,
+    ip: req.socket.remoteAddress
   });
 
   return json(res, 200, {

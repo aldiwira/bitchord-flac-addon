@@ -108,6 +108,7 @@ export async function handleSearch(req, res, url) {
     tier,
     rows: outcome.rows.length,
     ms: Date.now() - started,
+    ip: req.socket.remoteAddress
   });
 
   return json(res, 200, { tracks: outcome.rows.map(wireRow) });
